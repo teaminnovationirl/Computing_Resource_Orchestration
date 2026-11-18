@@ -1,5 +1,5 @@
-# Test settings only. Dependencies stay in requirements.txt and
-# requirements-dev.txt.
+# Test and type-check settings only. Dependencies stay in requirements.txt
+# and requirements-dev.txt.
 
 [tool.pytest.ini_options]
 minversion = "8.2"
@@ -10,4 +10,11 @@ pythonpath = ["."]
 addopts = ["--strict-markers", "-m", "not docker"]
 markers = [
     "docker: needs Docker Engine on Linux with cgroup v2",
+    "slow: real waits over 5 s",
+    "system: end-to-end tests in tests/system",
 ]
+
+[tool.pyright]
+# pyright (CLI and language server) reads the packages of the project's .venv.
+venvPath = "."
+venv = ".venv"
