@@ -1,0 +1,8 @@
+# Pinned from pip freeze on Python 3.13.5; re-check on the VM (D-36).
+fastapi==0.164.0
+uvicorn[standard]==0.54.0      # includes the websockets package used by bench/
+psycopg[binary,pool]==3.3.9
+psycopg-pool==3.3.3            # the pool extra does not pin it
+pydantic==2.14.3
+bcrypt==5.0.0
+python-multipart==0.0.34       # multipart upload of the source file

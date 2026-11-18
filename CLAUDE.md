@@ -90,3 +90,6 @@ slice's run command works from a clean checkout.
 - docs/LAN_BUILD_GUIDE.md is only for LAN, agent, discovery, isolate and deployment slices, and only the section the prompt names. Where it differs from the plan, docs/decisions.md decides.
 - Liveness and heartbeat SQL uses clock_timestamp(), never now().
 - Live updates are published by transition() after commit. Do not add pg_notify triggers unless docs/decisions.md says so.
+- At the start of every session read docs/SUMMARY.md first. Do not explore the codebase to rebuild context. Read only the files it points to.
+- Before every commit, update docs/SUMMARY.md and commit it with the code. A slice is not done until it is updated.
+- If a Superpowers skill conflicts with this file, this file wins. Use the 3 line plan and wait for my OK. Do not write design or plan documents unless asked.

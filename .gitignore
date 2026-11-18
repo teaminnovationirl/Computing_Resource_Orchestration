@@ -8,3 +8,4 @@ certs/
 *.pem
 *.key
 .claude/settings.local.json
+/data/
