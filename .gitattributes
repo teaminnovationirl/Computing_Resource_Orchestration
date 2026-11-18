@@ -1,0 +1,4 @@
+# Keep LF on every checkout, whatever core.autocrlf says (D-43): bash refuses a CRLF script, and
+# an expected output with a carriage return never matches a correct program's output.
+*.sh          text eol=lf
+seed_data/**  text eol=lf

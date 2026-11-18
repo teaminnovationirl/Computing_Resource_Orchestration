@@ -859,6 +859,7 @@ set -euo pipefail
 ADMIN_URL=${ADMIN_DATABASE_URL:-postgresql://postgres:postgres@localhost:5432/postgres}
 DB=${DB_NAME:-orch}
 DATA=${DATA_DIR:-./data}
+python -m scripts.capacity --check-database "$DB"   # D-46: stop first unless DATABASE_URL names $DB
 psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -f db/roles.sql
 psql "$ADMIN_URL" -c "DROP DATABASE IF EXISTS $DB WITH (FORCE)" -c "CREATE DATABASE $DB"
 psql "${ADMIN_URL%/*}/$DB" -v ON_ERROR_STOP=1 -f db/schema.sql -f db/seed.sql
@@ -866,6 +867,8 @@ mkdir -p "$DATA/problems" "$DATA/payloads" "$DATA/runs" "$DATA/logs"
 cp -r seed_data/problems/. "$DATA/problems/"
 python -m scripts.capacity --profile "${CAPACITY_PROFILE:-s0}"
 ```
+
+The script rebuilds DB_NAME, but `capacity.py` writes to the database in DATABASE_URL, so its first line writes nothing and stops the script (exit 2), before anything is dropped, when the two differ (D-46). `scripts/reset_db.ps1` makes the same check first.
 
 ### 4.6 What each rule protects
 
@@ -1201,6 +1204,7 @@ Callers guarantee the stop is confirmed before they call `release()` (E1 after i
 - `--profile host` (proposal): CPU = `os.cpu_count() * 1000`; RAM = `MemTotal` from `/proc/meminfo` in MiB; GPUs from `nvidia-smi --query-gpu=index,memory.total --format=csv,noheader,nounits` when `GPU_MODE=nvidia`, two logical 16,384 MiB GPUs when `GPU_MODE=simulated`, none when `GPU_MODE=none`.
 - `reserved = (total + 9) // 10` for every row; the CHECK refuses anything else.
 - Runs in `tx("E3")`, refuses to run while any allocation is open, updates existing rows and adds or removes GPU rows (a used GPU row cannot be deleted: the foreign key is RESTRICT).
+- `--check-database NAME` writes nothing and exits 2 unless DATABASE_URL names the database NAME; both reset scripts run it first with DB_NAME (D-46).
 
 ### 6.6 Tests
 
