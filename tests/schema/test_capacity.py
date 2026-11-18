@@ -3,7 +3,9 @@
 The rolled-back tests act as E3 the way the script does. The race test commits on connections of
 its own and removes what it created.
 """
+import os
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -269,6 +271,43 @@ def test_cli_reports_a_refused_connection_in_one_line(urls, capsys):
     assert capacity.main(["--profile", "s0"], env={"DATABASE_URL": refused}) == 1
     err = capsys.readouterr().err
     assert "database orch_test" in err and err.count("\n") == 1, err
+
+
+@pytest.mark.parametrize("url", ["postgresql://orch_app:orch@localhost:5432/orch",
+                                 "postgresql://orch_app:orch@localhost:5432"])
+def test_check_database_stops_when_database_url_names_another(url, capsys):
+    """Catches a reset that rebuilds DB_NAME while capacity.py writes to another database, or to none (D-46)."""
+    assert capacity.main(["--check-database", "orch2"], env={"DATABASE_URL": url}) == 2
+    err = capsys.readouterr().err
+    assert "orch2" in err and "DATABASE_URL" in err and err.count("\n") == 1, err
+
+
+def test_check_database_passes_without_connecting():
+    """Catches a check that connects: the reset scripts run it before the database server is up.
+    Nothing listens on port 1, so a connection attempt would fail and return 1."""
+    nowhere = "postgresql://orch_app:orch@127.0.0.1:1/orch2"
+    assert capacity.main(["--check-database", "orch2"], env={"DATABASE_URL": nowhere}) == 0
+
+
+RESET_SCRIPT = (["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", r"scripts\reset_db.ps1"]
+                if sys.platform == "win32" else ["bash", "scripts/reset_db.sh"])
+
+
+def test_reset_script_stops_before_anything_when_db_name_differs(urls, tmp_path):
+    """Catches a reset script without the D-46 guard, or with the guard after the rebuild: neither
+    the database DB_NAME nor the data folders may appear. Runs this platform's reset script."""
+    data = tmp_path / "data"
+    env = os.environ | {"DB_NAME": "orch_guard_check", "DATABASE_URL": urls.app, "DATA_DIR": str(data)}
+    try:
+        done = subprocess.run(RESET_SCRIPT, cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
+        assert done.returncode != 0, done.stdout
+        assert "orch_guard_check" in done.stdout + done.stderr
+        assert not data.exists()
+        with psycopg.connect(urls.owner) as conn:
+            assert conn.execute("SELECT count(*) FROM pg_database WHERE datname = 'orch_guard_check'").fetchone() == (0,)
+    finally:
+        with psycopg.connect(urls.owner, autocommit=True) as conn:
+            conn.execute("DROP DATABASE IF EXISTS orch_guard_check WITH (FORCE)")
 
 
 def _apply_once_the_other_run_waits(conn, monitor, rows, barrier, other_done) -> None:

@@ -2,8 +2,8 @@
 # Windows twin of scripts/reset_db.sh (decision D-38): drop and rebuild the development database
 # inside the docker compose service db, so no psql is needed on the host. Never run it during a
 # measured run. Then it creates the DATA_DIR folders, copies seed_data\problems into them and writes
-# the capacity profile with scripts\capacity.py, which connects with DATABASE_URL (database orch by
-# default, so DB_NAME must name the same database).
+# the capacity profile with scripts\capacity.py, which connects with DATABASE_URL. Before anything
+# else it stops unless DATABASE_URL names the database DB_NAME (default orch), decision D-46.
 # Usage, from any folder: powershell -ExecutionPolicy Bypass -File scripts\reset_db.ps1
 $ErrorActionPreference = 'Stop'
 $OutputEncoding = New-Object System.Text.UTF8Encoding $false  # pipe the SQL to psql as UTF-8
@@ -39,16 +39,18 @@ function Wait-Database {
 }
 
 function Invoke-Capacity {
-    # capacity.py writes a refusal to stderr. Under Stop, PowerShell 5.1 turns a redirected stderr
+    param([string[]]$Arguments)
+    # capacity.py writes its errors to stderr. Under Stop, PowerShell 5.1 turns a redirected stderr
     # line into a terminating error, so the exit code decides instead.
     $ErrorActionPreference = 'Continue'
     $python = if (Test-Path .venv\Scripts\python.exe) { '.venv\Scripts\python.exe' } else { 'python' }
-    & $python -m scripts.capacity --profile $capacityProfile
-    if ($LASTEXITCODE -ne 0) { throw "scripts\capacity.py failed, exit code $LASTEXITCODE" }
+    & $python -m scripts.capacity @Arguments
+    if ($LASTEXITCODE -ne 0) { throw "scripts\capacity.py $Arguments failed, exit code $LASTEXITCODE" }
 }
 
 Push-Location (Split-Path -Parent $PSScriptRoot)
 try {
+    Invoke-Capacity '--check-database', $db  # D-46: stop first unless DATABASE_URL names $db
     Wait-Database
     Invoke-Psql -Database postgres -File db\roles.sql
     Invoke-Psql -Database postgres -Commands "DROP DATABASE IF EXISTS $db WITH (FORCE)", "CREATE DATABASE $db"
@@ -60,7 +62,7 @@ try {
     }
     Copy-Item -Path seed_data\problems\* -Destination (Join-Path $data 'problems') -Recurse -Force
     Write-Output "Data folders ready under $data, with the problems of seed_data\problems."
-    Invoke-Capacity
+    Invoke-Capacity '--profile', $capacityProfile
 }
 finally {
     Pop-Location

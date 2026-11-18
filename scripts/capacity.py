@@ -178,16 +178,28 @@ def write(database_url: str, rows: list[Row]) -> list[Free]:
 def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m scripts.capacity",
                                      description="Write a capacity profile into the resources table.")
-    parser.add_argument("--profile", choices=CHOICES["capacity_profile"],
-                        help="s0: the S0 benchmark machine; host: this machine (default: CAPACITY_PROFILE)")
+    what = parser.add_mutually_exclusive_group()
+    what.add_argument("--profile", choices=CHOICES["capacity_profile"],
+                      help="s0: the S0 benchmark machine; host: this machine (default: CAPACITY_PROFILE)")
+    what.add_argument("--check-database", metavar="NAME",
+                      help="write nothing; exit 2 unless DATABASE_URL names the database NAME. "
+                           "The reset scripts run this first with DB_NAME (D-46).")
     args = parser.parse_args(argv)
     try:
         cfg = Config.from_env() if env is None else Config.from_env(env)
     except ValueError as exc:  # a bad setting is a usage error, like a bad argument
         print(f"capacity.py: {exc}", file=sys.stderr)
         return 2
-    profile = args.profile or cfg.capacity_profile
     database = conninfo_to_dict(cfg.database_url).get("dbname")
+    if args.check_database is not None:
+        if database == args.check_database:
+            return 0
+        named = f"the database {database}" if database else "no database"
+        print(f"capacity.py: the reset rebuilds the database {args.check_database} (DB_NAME), but "
+              f"DATABASE_URL names {named}; set both to the same database. Nothing was changed.",
+              file=sys.stderr)
+        return 2
+    profile = args.profile or cfg.capacity_profile
     try:
         rows = s0_rows() if profile == "s0" else host_rows(cfg.gpu_mode)
         free = write(cfg.database_url, rows)
