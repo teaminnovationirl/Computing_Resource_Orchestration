@@ -1,0 +1,12 @@
+# docker-compose.yml  (database only; the app runs on the host because it drives Docker)
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports: ["5432:5432"]
+    command: ["postgres", "-c", "log_lock_waits=on", "-c", "deadlock_timeout=1s",
+              "-c", "max_connections=200"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+volumes:
+  pgdata: {}

@@ -1,0 +1,13 @@
+# Test settings only. Dependencies stay in requirements.txt and
+# requirements-dev.txt.
+
+[tool.pytest.ini_options]
+minversion = "8.2"
+testpaths = ["tests"]
+pythonpath = ["."]
+# pytest -q runs everything that needs no Docker. pytest -q -m docker runs
+# the sandbox tests, because a -m on the command line replaces this one.
+addopts = ["--strict-markers", "-m", "not docker"]
+markers = [
+    "docker: needs Docker Engine on Linux with cgroup v2",
+]
