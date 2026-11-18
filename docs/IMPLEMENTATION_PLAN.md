@@ -284,8 +284,8 @@ Every file the finished product has. The slice that creates each file is in brac
 ├── db/
 │   ├── roles.sql                       [A-2] database roles, once per cluster
 │   ├── schema.sql                      [A-2] 15 tables, constraints, indexes, triggers, grants
-│   ├── seed.sql                        [A-3] workload types, demo users, session 7, problem 12
-│   └── invariants.sql                  [A-3] the invariant and leak queries
+│   ├── seed.sql                        [A-2] workload types, demo users, session 7, problem 12
+│   └── invariants.sql                  [A-2] the invariant and leak queries
 ├── seed_data/problems/12/              [A-3] 01.in, 01.out ... 10.in, 10.out
 ├── app/
 │   ├── main.py                         [C-1] app factory, lifespan, startup order
@@ -350,6 +350,7 @@ Every file the finished product has. The slice that creates each file is in brac
 │   └── r1/  01_ac.c ... 20_mle.c  expected.json  tests/
 ├── scripts/
 │   ├── reset_db.sh                     [A-3] roles, schema, seed, copy seed_data
+│   ├── reset_db.ps1                    [A-2] Windows run command: roles, schema, seed (D-38)
 │   ├── capacity.py                     [A-3] capacity profile s0 or host
 │   ├── add_users.py                    [E4-2] users from CSV, bcrypt
 │   ├── add_problem.py                  [E1-4] problem and test files from a folder
@@ -366,7 +367,7 @@ Runtime data under `DATA_DIR` (git-ignored): `payloads/<uuid>/prog.c`, `runs/<jo
 
 ## 4. Database
 
-The four files below are complete and were run on PostgreSQL 16.15 before this plan was written: the schema builds 15 tables and 17 foreign keys, and 25 behaviour checks passed, including 100 runs of the last-unit test with exactly one commit each. Slice A-2 commits them and turns those checks into `tests/schema/`.
+The four files below are complete and were run on PostgreSQL 16.15 before this plan was written: the schema builds 15 tables and 17 foreign keys, and 25 behaviour checks passed, including 100 runs of the last-unit test with exactly one commit each. Slice A-2 commits them and turns those checks into `tests/schema/`. Slice A-2 then applied the security fix of D-40 to 4.2 (search_path pinned with pg_temp last in the trigger functions, EXECUTE on job_state_track() revoked, no sequence grants); the block below includes it.
 
 Three things the baseline asks for are enforced by the database itself, not only by code: the transition list (trigger), the 10% reserve (`resources_reserve_ck`) and the table ownership of §7 (one role per engine, column-level grant on `jobs.state` for `transition()`).
 
@@ -586,7 +587,8 @@ CREATE INDEX audit_job_idx ON allocation_audit (job_id, audit_id);
 CREATE INDEX audit_allocation_idx ON allocation_audit (allocation_id);
 
 -- ======================================================================
--- Triggers
+-- Triggers. Every function that reads or writes a table pins search_path with pg_temp
+-- last, so a session's temporary tables cannot stand in for these tables (D-40).
 -- ======================================================================
 
 -- 1. Append-only audit and history
@@ -600,7 +602,7 @@ CREATE TRIGGER allocation_audit_append_only BEFORE UPDATE OR DELETE ON allocatio
     FOR EACH ROW EXECUTE FUNCTION forbid_change();
 
 -- 2. CONDUCTS and AUTHORS link only users whose role is faculty
-CREATE FUNCTION require_faculty() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE FUNCTION require_faculty() RETURNS trigger LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 DECLARE
     uid TEXT := to_jsonb(NEW) ->> TG_ARGV[0];
 BEGIN
@@ -616,7 +618,7 @@ CREATE TRIGGER problems_faculty BEFORE INSERT OR UPDATE OF created_by ON problem
     FOR EACH ROW EXECUTE FUNCTION require_faculty('created_by');
 
 -- 3. A faculty member's role stays fixed while they own sessions or problems
-CREATE FUNCTION keep_faculty_role() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE FUNCTION keep_faculty_role() RETURNS trigger LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
     IF OLD.role = 'faculty' AND NEW.role <> 'faculty' AND (
            EXISTS (SELECT 1 FROM lab_sessions WHERE faculty_id = OLD.user_id)
@@ -642,7 +644,7 @@ LANGUAGE sql IMMUTABLE AS $$
 $$;
 
 CREATE FUNCTION job_state_track() RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
     v_actor  TEXT := nullif(current_setting('app.actor',  true), '');
     v_reason TEXT := nullif(current_setting('app.reason', true), '');
@@ -672,7 +674,7 @@ CREATE TRIGGER jobs_state_track AFTER INSERT OR UPDATE OF state ON jobs
     FOR EACH ROW EXECUTE FUNCTION job_state_track();
 
 -- 5. M1: a test result's case must belong to the problem of its attempt's job
-CREATE FUNCTION test_result_case_check() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE FUNCTION test_result_case_check() RETURNS trigger LANGUAGE plpgsql SET search_path = public, pg_temp AS $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1
@@ -694,7 +696,8 @@ CREATE TRIGGER test_results_case BEFORE INSERT OR UPDATE ON test_results
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO orch_app, e1_role, e2_role, e3_role, e4_role;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO orch_app, e1_role, e2_role, e3_role, e4_role;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO e1_role, e2_role, e3_role, e4_role;
+-- No sequence grants: identity columns need none, and USAGE would let an engine burn
+-- another engine's ids with nextval() (D-40).
 
 GRANT INSERT, UPDATE, DELETE ON attempts, problems, test_cases, test_results       TO e1_role;
 GRANT INSERT, UPDATE, DELETE ON jobs, workload_types, lab_sessions                  TO e2_role;
@@ -704,6 +707,8 @@ GRANT INSERT, UPDATE, DELETE ON users, login_sessions, worker_liveness          
 -- transition(): the one cross-table write. Column-level, so nothing else on jobs.
 GRANT UPDATE (state) ON jobs TO e1_role, e3_role, e4_role;
 -- job_state_history: no grant at all. Only the SECURITY DEFINER trigger writes it.
+-- Nobody may call it or attach it to another table; firing a trigger needs no EXECUTE (D-40).
+REVOKE EXECUTE ON FUNCTION job_state_track() FROM PUBLIC;
 
 COMMIT;
 ```
@@ -875,6 +880,7 @@ python -m scripts.capacity --profile "${CAPACITY_PROFILE:-s0}"
 | `require_faculty`, `keep_faculty_role` | CONDUCTS and AUTHORS link only faculty | `tests/schema/test_triggers.py` |
 | `test_result_case_check` (M1) | A verdict always belongs to the attempt's problem | same |
 | Engine roles and grants | Each engine writes only its own tables (§7) | `tests/schema/test_grants.py` |
+| `search_path = public, pg_temp` in the trigger functions; `REVOKE EXECUTE` on `job_state_track()`; no sequence grants (D-40) | A session's temporary tables cannot stand in for real ones; nobody can call or attach the history writer or burn another engine's ids | `tests/schema/test_grants.py`, `tests/schema/test_triggers.py` |
 
 ## 5. Common layer (slice A-4)
 
@@ -2081,8 +2087,8 @@ Reads every run's results and writes `docs/kpi_report.md`: one row per NFR with 
 | Slice | Owner | Week | Builds | Needs | Done when | Covers |
 | --- | --- | --- | --- | --- | --- | --- |
 | A-1 | Abhishek; every member sets up their machine | 10 | Repository, `CLAUDE.md`, `config.py`, requirements, `pyproject.toml`, `docker-compose.yml`, docs folder | nothing | `docker compose up -d db` works; `pytest -q` runs; each member's machine prints `cgroup2fs` | setup |
-| A-2 | Sagar; each owner reviews their own tables | 10 | `db/roles.sql`, `db/schema.sql`, `tests/schema/` | A-1 | 15 tables, 17 foreign keys; the 25 checks of section 4 pass as tests | FR-05, FR-06, FR-11, NFR-05, NFR-06 |
-| A-3 | Sagar | 10 | `db/seed.sql`, `db/invariants.sql`, `seed_data/problems/12/`, `scripts/reset_db.sh`, `scripts/capacity.py` | A-2 | Reset from a clean checkout; S0 free capacity 28,800, 117,964 and 14,745; invariant query empty | NFR-06 |
+| A-2 | Sagar | 10 | `db/roles.sql`, `db/schema.sql`, `db/seed.sql`, `db/invariants.sql`, `scripts/reset_db.ps1`, `tests/schema/` | A-1 | 15 tables, 17 foreign keys; the 25 checks of section 4 pass as tests; invariant query empty | FR-05, FR-06, FR-11, NFR-05, NFR-06 |
+| A-3 | Sagar | 10 | `seed_data/problems/12/`, `scripts/reset_db.sh`, `scripts/capacity.py`; adds the data folders and capacity to `scripts/reset_db.ps1` | A-2 | Reset from a clean checkout; S0 free capacity 28,800, 117,964 and 14,745; invariant query empty | NFR-06 |
 | A-4 | Sagar | 10 | `app/common/*`, `tests/conftest.py`, `helpers.py`, `stubs.py` | A-2 | The six checks at the end of 5.6 | invariants 2, 3, 6 |
 | E4-1 | Aniruddh | 10 | `state.py` | A-4 | All 64 state pairs tested | FR-11, NFR-05 |
 | E3-1 | Sagar | 10 | `placement.py`, `queries.py`, `snapshot()` | A-4 | `test_placement`, `test_snapshot` | FR-03 |
