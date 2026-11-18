@@ -1,11 +1,15 @@
 # scripts/reset_db.ps1
 # Windows twin of scripts/reset_db.sh (decision D-38): drop and rebuild the development database
 # inside the docker compose service db, so no psql is needed on the host. Never run it during a
-# measured run. Slice A-2 builds roles, schema and seed; slice A-3 adds the data folders and capacity.
+# measured run. Then it creates the DATA_DIR folders, copies seed_data\problems into them and writes
+# the capacity profile with scripts\capacity.py, which connects with DATABASE_URL (database orch by
+# default, so DB_NAME must name the same database).
 # Usage, from any folder: powershell -ExecutionPolicy Bypass -File scripts\reset_db.ps1
 $ErrorActionPreference = 'Stop'
 $OutputEncoding = New-Object System.Text.UTF8Encoding $false  # pipe the SQL to psql as UTF-8
 $db = if ($env:DB_NAME) { $env:DB_NAME } else { 'orch' }
+$data = if ($env:DATA_DIR) { $env:DATA_DIR } else { '.\data' }
+$capacityProfile = if ($env:CAPACITY_PROFILE) { $env:CAPACITY_PROFILE } else { 's0' }
 
 function Invoke-Psql {
     param([string]$Database, [string]$File, [string[]]$Commands = @())
@@ -34,6 +38,15 @@ function Wait-Database {
     }
 }
 
+function Invoke-Capacity {
+    # capacity.py writes a refusal to stderr. Under Stop, PowerShell 5.1 turns a redirected stderr
+    # line into a terminating error, so the exit code decides instead.
+    $ErrorActionPreference = 'Continue'
+    $python = if (Test-Path .venv\Scripts\python.exe) { '.venv\Scripts\python.exe' } else { 'python' }
+    & $python -m scripts.capacity --profile $capacityProfile
+    if ($LASTEXITCODE -ne 0) { throw "scripts\capacity.py failed, exit code $LASTEXITCODE" }
+}
+
 Push-Location (Split-Path -Parent $PSScriptRoot)
 try {
     Wait-Database
@@ -42,6 +55,12 @@ try {
     Invoke-Psql -Database $db -File db\schema.sql
     Invoke-Psql -Database $db -File db\seed.sql
     Write-Output "Database $db rebuilt from db\roles.sql, db\schema.sql and db\seed.sql."
+    foreach ($folder in 'problems', 'payloads', 'runs', 'logs') {
+        New-Item -ItemType Directory -Force -Path (Join-Path $data $folder) | Out-Null
+    }
+    Copy-Item -Path seed_data\problems\* -Destination (Join-Path $data 'problems') -Recurse -Force
+    Write-Output "Data folders ready under $data, with the problems of seed_data\problems."
+    Invoke-Capacity
 }
 finally {
     Pop-Location
