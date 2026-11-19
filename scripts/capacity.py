@@ -8,7 +8,8 @@ names (none; two simulated GPUs of 16,384 MiB; or nvidia-smi). The profile defau
 CAPACITY_PROFILE. Every row gets reserved = ceil(10% of total), as resources_reserve_ck requires.
 
 The script refuses to run while any allocation is open, and never removes a GPU row that allocation
-history still names. Run it while the server is stopped: E3 caches the resource ids at startup.
+history still names. Run it while the server is stopped, so that no job holds an allocation; E3 reads
+the resource ids in every transaction and keeps no cache (D-68).
 """
 import argparse
 import os
