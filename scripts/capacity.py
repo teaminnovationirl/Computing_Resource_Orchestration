@@ -17,11 +17,12 @@ import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
 
+from app.common.db import Tx, close_pool, init_pool, tx
 from app.config import CHOICES, Config
 
 S0_CPU_MILLICORES = 32000
@@ -139,14 +140,15 @@ def _nvidia_gpus(run: Callable[[], str]) -> list[Row]:
     return gpus
 
 
-def apply(conn: psycopg.Connection, rows: list[Row]) -> list[Free]:
+def apply(conn: psycopg.Connection[Any] | Tx, rows: list[Row]) -> list[Free]:
     """Make the resources rows match rows, inside the caller's transaction, which already acts as
     e3_role. Every resources row is locked first, in resource_id order (invariant 2), so no
     allocation can start or commit between the checks and the writes. Rows are matched by kind and
     gpu_index and updated in place, so resource ids never change. Raises CapacityError before
     any write."""
     conn.execute(LOCK_ALL)
-    if conn.execute(ANY_OPEN).fetchone()[0]:
+    open_row = conn.execute(ANY_OPEN).fetchone()
+    if open_row is None or open_row[0]:  # EXISTS always returns one row
         raise CapacityError("an allocation is open; let every job end, then stop the server")
     # Read again after the lock: this also sees rows that another run added while this one waited.
     current = {(kind, gpu_index): rid for rid, kind, gpu_index in conn.execute(CURRENT)}
@@ -167,12 +169,15 @@ def apply(conn: psycopg.Connection, rows: list[Row]) -> list[Free]:
 
 
 def write(database_url: str, rows: list[Row]) -> list[Free]:
-    """Apply rows in one transaction of its own as e3_role (D-41). The transaction rolls back on any
-    exception, and nothing runs outside it. Slice A-4 replaces this connection with tx("E3")."""
-    with psycopg.connect(database_url, autocommit=True, connect_timeout=10) as conn:
-        with conn.transaction():
-            conn.execute("SET LOCAL ROLE e3_role")
-            return apply(conn, rows)
+    """Apply rows in one tx("E3") on a pool of one connection to database_url (D-41): the
+    transaction rolls back on any exception, and nothing runs outside it. This process opens and
+    closes that pool, so write() refuses to run where a pool is already open, as in the server."""
+    init_pool(database_url, min_size=1, max_size=1)
+    try:
+        with tx("E3") as cur:
+            return apply(cur, rows)
+    finally:
+        close_pool()
 
 
 def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) -> int:
