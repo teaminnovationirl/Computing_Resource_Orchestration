@@ -55,6 +55,8 @@ another engine's internal modules.
 - All timers go through app/common/clock.py. Deadlines use time.monotonic.
   Database times use clock_timestamp().
 - Retry only SQLSTATE 40P01 and 40001, at most 3 times, then raise.
+- Inside tx(), take savepoints only with t.savepoint(), never connection.transaction() directly:
+  t.savepoint() also drops the after_commit hooks of work it rolls back (D-67).
 - Never shell=True. Every file path must resolve inside DATA_DIR.
 - No new tables, columns, endpoints or libraries unless the plan lists them.
   If the plan or the baseline looks wrong, stop and report in 3 lines

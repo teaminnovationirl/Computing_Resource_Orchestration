@@ -3,8 +3,9 @@
 Every engine transaction runs as that engine's database role: `with tx("E3") as cur:`. Work that
 leaves the process (dispatch, hub pushes, E2 notices) is registered with cur.after_commit() and
 runs only after COMMIT, once the connection is back in the pool and no lock is held (invariant 3).
-A database error the body must survive belongs in a savepoint (`with cur.cur.connection.transaction():`);
-a caught error without one makes tx() refuse to commit.
+A database error the body must survive belongs in a savepoint, taken only with `with cur.savepoint():`
+and never with connection.transaction() directly, so a rollback also drops its hooks (D-67); a caught
+error without one makes tx() refuse to commit (D-48).
 """
 from __future__ import annotations
 
@@ -72,6 +73,22 @@ class Tx:
         if self.finished:
             raise RuntimeError("after_commit() on a finished transaction: the hook would never run")
         self.hooks.append(fn)
+
+    @contextmanager
+    def savepoint(self) -> Iterator[None]:
+        """A savepoint inside this transaction, the only way to survive a database error in the body
+        of tx() (D-48, D-67). When it rolls back (an exception, or psycopg.Rollback), the
+        after_commit hooks registered inside it are dropped too, including those of inner
+        savepoints that were already released, so nothing is pushed for work that was undone."""
+        mark = len(self.hooks)
+        released = False
+        try:
+            with self.cur.connection.transaction():
+                yield
+                released = True
+        finally:
+            if not released:
+                del self.hooks[mark:]
 
 
 def init_pool(dsn: str, min_size: int, max_size: int) -> None:
