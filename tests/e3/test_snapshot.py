@@ -11,18 +11,10 @@ import pytest
 from app.common.db import tx
 from app.common.types import Snapshot
 from app.e3_allocation import snapshot
-from tests.helpers import ROOT, TempDb, assert_invariants
+from tests.helpers import TempDb, assert_invariants
 from tests.stubs import s0_free
 
 S0_FREE = Snapshot(cpu_free=28800, ram_free=117964, gpu_free={0: 14745, 1: 14745})
-
-
-@pytest.fixture
-def s0(db: TempDb) -> TempDb:
-    """A fresh database with db/seed.sql loaded: resources 1 cpu, 2 ram, 3 gpu 0 and 4 gpu 1 (S0)."""
-    with psycopg.connect(db.owner_url, autocommit=True) as conn:
-        conn.execute((ROOT / "db" / "seed.sql").read_bytes())
-    return db
 
 
 def _set_allocated(amounts: dict[int, int]) -> None:

@@ -21,10 +21,12 @@ import pytest
 
 from app.common.db import Engine, Tx, close_pool, init_pool, tx
 from app.common.errors import IllegalTransition, NotFound
+from app.common.types import Vector
 from app.e4_monitoring.state import JobState, transition
-from tests.helpers import ACTOR, ALLOWED, STATES, TempDb, assert_invariants, make_job
+from tests.helpers import ACTOR, ALLOWED, STATES, TempDb, assert_invariants, invariant_violations, make_job
 
 RACES = 100
+SMALL = Vector(100, 64)  # allocated and running jobs hold a real allocation: 100 of these fit S0 (D-73)
 LEGAL = sorted(ALLOWED)
 ILLEGAL = [(old, new) for old in STATES for new in STATES if (old, new) not in ALLOWED]
 assert len(LEGAL) == 13 and len(ILLEGAL) == 51, "context §9 allows 13 of the 64 ordered pairs"
@@ -58,7 +60,8 @@ def owner_of(job_id: int) -> str:
 def test_a_legal_move_writes_exactly_one_history_row(db: TempDb, from_state: JobState, to_state: JobState):
     """Catches an UPDATE that misses the job, settings the trigger cannot see (JT002) and a second
     writer of history next to the trigger: each of the 13 moves, run in the engine that makes it
-    (plan 7.2), adds exactly one row carrying the arguments as passed."""
+    (plan 7.2), adds exactly one row carrying the arguments as passed. A bare admitted to allocated
+    move skips allocate(), so the invariant query must report exactly that job's missing allocation."""
     job = make_job(from_state)
     before = history(job)
     engine = ACTOR[(from_state, to_state)]
@@ -67,7 +70,8 @@ def test_a_legal_move_writes_exactly_one_history_row(db: TempDb, from_state: Job
         transition(cur, job, to_state, engine, reason)
     assert history(job) == before + [(from_state, to_state, engine, reason)]
     assert state_of(job) == to_state
-    assert_invariants(unallocated={job})
+    bare = (from_state, to_state) == ("admitted", "allocated")
+    assert invariant_violations() == ([("invariants", "missing_allocation", str(job), "allocated")] if bare else [])
 
 
 @pytest.mark.parametrize(("from_state", "to_state"), ILLEGAL)
@@ -87,7 +91,7 @@ def test_an_illegal_move_raises_and_leaves_the_transaction_usable(db: TempDb, fr
         assert row == (from_state, len(before))
     assert state_of(job) == from_state and history(job) == before
     assert len(db.stubs.hub.events) == published
-    assert_invariants(unallocated={job})
+    assert_invariants()
 
 
 # --- app.actor and app.reason -----------------------------------------------------------------
@@ -135,12 +139,12 @@ def test_state_settings_do_not_outlive_the_transaction(db: TempDb):
     init_pool(db.app_url, min_size=1, max_size=1)
     job = make_job("admitted")
     with tx("E3") as cur:
-        transition(cur, job, "allocated", "E3", "allocation committed")
+        transition(cur, job, "queued", "E3", "refused: capacity taken first")
     with tx("E4") as cur:
         leftover = cur.execute("SELECT nullif(current_setting('app.actor', true), ''), "
                                "nullif(current_setting('app.reason', true), '')").fetchone()
     assert leftover == (None, None)
-    assert_invariants(unallocated={job})
+    assert_invariants()
 
 
 # --- the job_state event (message 12) ---------------------------------------------------------
@@ -315,7 +319,7 @@ def test_expected_state_refuses_a_job_that_has_moved(db: TempDb):
         row = cur.execute("SELECT state FROM jobs WHERE job_id = %s", (job,)).fetchone()
         assert row == ("running",)
     assert history(job) == before and len(db.stubs.hub.events) == published
-    assert_invariants(unallocated={job})
+    assert_invariants()
 
 
 # --- concurrency: separate connections that commit, a Barrier, 100 runs -------------------------
@@ -348,7 +352,7 @@ def test_two_conflicting_moves_at_once_exactly_one_wins(db: TempDb):
     actor = {"completed": "E1", "failed": "E4"}
     with ThreadPoolExecutor(max_workers=2) as pool:
         for _ in range(RACES):
-            job = make_job("running")
+            job = make_job("running", SMALL)
             before = history(job)
             outcomes = race(pool, job, [("E1", "completed"), ("E4", "failed")])
             assert sorted(outcomes) in (["completed", "refused"], ["failed", "refused"])
@@ -363,18 +367,15 @@ def test_start_and_cancel_at_once_with_an_expected_state_exactly_one_wins(db: Te
     it before start (plan 7.2), both decided on allocated. Exactly one wins, and history never
     shows running to cancelled, which would cancel a running job without stop and confirm."""
     actor = {"running": "E1", "cancelled": "E4"}
-    started: list[int] = []
     with ThreadPoolExecutor(max_workers=2) as pool:
         for _ in range(RACES):
-            job = make_job("allocated")
+            job = make_job("allocated", SMALL)
             before = history(job)
             outcomes = race(pool, job, [("E1", "running"), ("E4", "cancelled")], expected="allocated")
             assert sorted(outcomes) in (["refused", "running"], ["cancelled", "refused"])
             winner = outcomes[0] if outcomes[0] != "refused" else outcomes[1]
             assert history(job)[len(before):] == [("allocated", winner, actor[winner], "race")]
-            if winner == "running":
-                started.append(job)
-    assert_invariants(unallocated=started)
+    assert_invariants()
 
 
 def waiting(cur: Tx, pid: int) -> bool:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from app.common.db import close_pool, init_pool, tx
+from app.common.types import Vector
 from tests.helpers import ALLOWED, STATES, TempDb, assert_invariants, invariant_queries, make_job, make_problem
 
 
@@ -70,22 +71,25 @@ def test_make_job_reaches_every_state_through_transition(db: TempDb):
                                 "ORDER BY event_id", (job,)).fetchall()
             assert row == (state,) and steps[0] == (None, "queued") and steps[-1][1] == state
             assert all(old[1] == new[0] and (new[0], new[1]) in ALLOWED for old, new in zip(steps, steps[1:]))
-    assert_invariants(unallocated={jobs["allocated"], jobs["running"]})
+    assert_invariants(settled=True)
 
 
-def test_unallocated_excuses_only_missing_allocation_rows_of_those_jobs(db: TempDb):
-    """Catches an excuse that is too wide: matching the check name alone would hide every job left
-    without an allocation, and dropping every row would hide all other violations."""
-    excused, other = make_job("allocated"), make_job("running")
-    assert_invariants(unallocated={excused, other})
-    with pytest.raises(AssertionError) as failed:
-        assert_invariants(unallocated={excused})
-    assert f"'missing_allocation', '{other}', 'running'" in str(failed.value)
-    assert f"'{excused}'" not in str(failed.value)
-    with tx("E3") as cur:
-        cur.execute("INSERT INTO resources (kind, total, reserved, allocated) VALUES ('cpu', 1000, 100, 5)")
-    with pytest.raises(AssertionError, match="allocated=5 held=0"):
-        assert_invariants(unallocated={excused, other})
+def test_make_job_allocates_allocated_and_running_jobs_through_allocate(db: TempDb):
+    """Catches a factory that moves a job to allocated without an allocation: invariant 4 would fail on
+    the test data of every later slice, and E3's audit row and dispatch would be missing (D-73). The
+    resources table starts empty, so make_job loads S0 first (ids 1 cpu, 2 ram, 3 and 4 GPUs); a
+    completed job holds nothing, as after a release."""
+    jobs = {state: make_job(state, Vector(1000, 512)) for state in ("allocated", "running", "completed")}
+    allocated, running = jobs["allocated"], jobs["running"]
+    with tx("E4") as cur:
+        held = cur.execute("SELECT a.job_id, i.resource_id, i.amount FROM allocations a "
+                           "JOIN allocation_items i USING (allocation_id) WHERE a.status = 'open' "
+                           "ORDER BY a.job_id, i.resource_id").fetchall()
+        audited = cur.execute("SELECT job_id, outcome FROM allocation_audit ORDER BY audit_id").fetchall()
+    assert held == [(allocated, 1, 1000), (allocated, 2, 512), (running, 1, 1000), (running, 2, 512)]
+    assert audited == [(allocated, "committed"), (running, "committed")]
+    assert [args[0] for name, args in db.stubs.e1.calls if name == "dispatch"] == [allocated, running]
+    assert_invariants(settled=True)
 
 
 def test_make_problem_gives_a_faculty_owner_and_numbered_cases(db: TempDb):

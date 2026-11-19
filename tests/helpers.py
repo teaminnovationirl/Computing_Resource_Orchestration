@@ -4,14 +4,15 @@ factories. Import this module as tests.helpers only: a second import path would 
 from __future__ import annotations
 
 import secrets
-from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 from app.common.db import Engine, tx
-from app.common.types import Vector
+from app.common.types import Committed, Vector
+from app.e3_allocation import allocate
 from app.e4_monitoring.state import JobState, set_actor, transition
+from scripts.capacity import apply, s0_rows
 from tests.stubs import Stubs
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,19 +68,21 @@ def invariant_queries() -> dict[str, bytes]:
     return {name: "\n".join(lines).encode() for name, lines in queries.items()}
 
 
-def assert_invariants(settled: bool = False, unallocated: Collection[int] = ()) -> None:
-    """Run the invariants query of db/invariants.sql on the database of the open pool and, once the
-    run has settled, the leaks query too; fail listing every violating row. Every engine role may
-    read every table; this one reads as E4. unallocated: jobs that make_job left allocated or
-    running, which cannot hold an allocation before E3-2; their missing_allocation rows, and no
-    other row, are excused (D-63)."""
+def invariant_violations(settled: bool = False) -> list[tuple[object, ...]]:
+    """Every row of the invariants query of db/invariants.sql on the database of the open pool and,
+    once the run has settled, of the leaks query too, each led by its query's name. Every engine role
+    may read every table; this one reads as E4."""
     queries = invariant_queries()
-    excused = {str(job_id) for job_id in unallocated}
     found: list[tuple[object, ...]] = []
     with tx("E4") as cur:
         for name in ["invariants", "leaks"] if settled else ["invariants"]:
-            found += [(name, *row) for row in cur.execute(queries[name]).fetchall()
-                      if not (name == "invariants" and row[0] == "missing_allocation" and row[1] in excused)]
+            found += [(name, *row) for row in cur.execute(queries[name]).fetchall()]
+    return found
+
+
+def assert_invariants(settled: bool = False) -> None:
+    """Fail listing every violating row of invariant_violations(settled)."""
+    found = invariant_violations(settled)
     assert not found, "db/invariants.sql found violations:\n" + "\n".join(map(str, found))
 
 
@@ -112,10 +115,12 @@ def make_job(state: JobState = "queued", vector: Vector = Vector(1000, 512)) -> 
     """A cpu_bound job of a new student in the given state; returns its job_id. E2 inserts it the
     way submit() will: the state trigger demands app.actor and app.reason on the INSERT too
     (JT002), so they are set for that one transaction only (D-51). Each step of PATH[state] then
-    runs through transition() in its own tx() of the engine that makes it (plan 7.2), so the
-    trigger checks the test data too, and each step publishes one job_state event to the stub hub.
-    An allocated or running job has no allocation until E3-2: pass it to
-    assert_invariants(unallocated=...)."""
+    runs in the engine that makes it (plan 7.2), so the trigger checks the test data too, and each
+    step publishes one job_state event to the stub hub. A job that ends allocated or running gets
+    its allocation of vector from e3 allocate(), which also dispatches it to the stub E1 and
+    publishes a capacity event; the S0 capacity is loaded first when resources is empty. Every
+    other step runs through transition() in its own tx(), so completed, failed and released jobs
+    hold nothing, as after a release (D-73)."""
     steps = PATH[state]  # an unknown state fails here, before anything is written
     user_id = make_user("student")
     with tx("E2") as cur:
@@ -131,7 +136,20 @@ def make_job(state: JobState = "queued", vector: Vector = Vector(1000, 512)) -> 
     current: JobState = "queued"
     for step in steps:
         engine = ACTOR[(current, step)]
-        with tx(engine) as cur:
-            transition(cur, job_id, step, engine, f"test: {step}")
+        if step == "allocated" and state in ("allocated", "running"):
+            _allocate(job_id, vector)
+        else:
+            with tx(engine) as cur:
+                transition(cur, job_id, step, engine, f"test: {step}")
         current = step
     return job_id
+
+
+def _allocate(job_id: int, vector: Vector) -> None:
+    """Move the admitted job to allocated with a real allocation, on the S0 capacity when none is loaded."""
+    with tx("E3") as cur:
+        row = cur.execute("SELECT count(*) FROM resources").fetchone()
+        if row is not None and row[0] == 0:
+            apply(cur, s0_rows())
+    result = allocate(job_id, vector)
+    assert isinstance(result, Committed), f"make_job: allocate() refused job {job_id}: {result}"
