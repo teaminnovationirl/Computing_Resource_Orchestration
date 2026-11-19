@@ -93,3 +93,11 @@ slice's run command works from a clean checkout.
 - At the start of every session read docs/SUMMARY.md first. Do not explore the codebase to rebuild context. Read only the files it points to.
 - Before every commit, update docs/SUMMARY.md and commit it with the code. A slice is not done until it is updated.
 - If a Superpowers skill conflicts with this file, this file wins. Use the 3 line plan and wait for my OK. Do not write design or plan documents unless asked.
+
+## Machine limits (permanent; the development laptop hung under load on 2026-11-19)
+
+- One pytest process at a time. Never run subagents in parallel: run them one after another, and a subagent never runs tests while another test run is active.
+- During development run only the affected test files; run the full suite once, just before the commit. For a planted bug, run only the test file that should catch it.
+- Do not pull or build extra Docker images for verification. Linux verification happens at C-4 or when asked.
+- Before a command that creates many databases or may run longer than 5 minutes, say so first.
+- The development PostgreSQL (docker-compose.yml) runs with fsync, synchronous_commit and full_page_writes off to cut disk writes. Development and tests only, never the demo machine. After a crash, rebuild it with the reset script.
