@@ -2,7 +2,7 @@
 
 Current state of the build. Rewrite a section when it changes; this is not a log. Read it first, then only the files it points to.
 
-Last updated: 2026-11-19, end of slice E4-1.
+Last updated: 2026-11-19, end of slice E3-1.
 
 ## Status
 
@@ -12,16 +12,17 @@ Last updated: 2026-11-19, end of slice E4-1.
 | A-2 | done: roles, schema (with the D-40 fix), seed, invariants, `tests/schema/` (25 tests), `scripts/reset_db.ps1` | merged to main (524d85f) |
 | A-3 | done: `seed_data/problems/12/`, `scripts/capacity.py`, `scripts/reset_db.sh`, data folders, `.gitattributes`, the DB_NAME guard (D-46), 44 tests | merged to main (15cd962) |
 | A-4 | done: `app/common/*`, `tests/conftest.py`, `helpers.py`, `stubs.py`, `tests/common/`; reviewed | merged to main (f0130cc) |
-| E4-1 | done: `app/e4_monitoring/state.py`, `Tx.savepoint()`, `tests/e4/test_transition.py` (86), make_job for every state; reviewed | slice/E4-1: "Dev: machine limits and lighter test database" (271763a) and "E4-1: state machine and transition()"; not pushed or merged |
-| all others | not started: E3-1, E3-2, E2-1, E2-2, E1-1, E3-3, E2-3, E2-4, E1-2, E1-3, E4-2 to E4-7, E1-4, C-1 to C-4, X-1 to X-6, X-7 (optional); order in plan 14.1 | none |
+| E4-1 | done: `app/e4_monitoring/state.py`, `Tx.savepoint()`, `tests/e4/test_transition.py` (86), make_job for every state; reviewed | merged to main (1503b5b) |
+| E3-1 | done: `app/e3_allocation/` (`__init__`, `placement`, `queries`, `service`), `tests/e3/` (14); reviewed | slice/E3-1: "E3-1: placement and snapshot"; not pushed or merged |
+| all others | not started: E3-2, E2-1, E2-2, E1-1, E3-3, E2-3, E2-4, E1-2, E1-3, E4-2 to E4-7, E1-4, C-1 to C-4, X-1 to X-6, X-7 (optional); order in plan 14.1 | none |
 
-## Changes in the last session (2026-11-19, slice E4-1)
+## Changes in the last session (2026-11-19, slice E3-1)
 
-- New `app/e4_monitoring/state.py`: transition() on its own cursor inside `t.savepoint()`, an open-transaction guard, only JT001 as IllegalTransition, keyword-only `expected` (D-65), settings cleared after the savepoint, the job_state event after COMMIT; new `Tx.savepoint()` drops the hooks of rolled-back work (D-61 to D-64, D-67).
-- Tests: `tests/e4/test_transition.py` (86: all 64 pairs, settings, events, savepoints, error paths, two Barrier x100 races, a lock-wait and a lost-connection test); `tests/helpers.py` make_job for every state and `assert_invariants(unallocated=...)`; test_harness +2, test_tx +1.
-- Verified: 11 planted bugs each caught by its test; full suite 217 passed; pyright 0 errors on the changed files; invariants 0 rows on orch.
-- A separate code review and an incident-thinker pass led to: the own cursor, the hook naming its job, the lost-connection case, actor typed Engine, `Tx.savepoint()`. A laptop crash during review led to CLAUDE.md "Machine limits" and the lighter dev database (D-66).
-- `docs/decisions.md`: D-61 to D-67 added.
+- New `app/e3_allocation/`: `placement.py` (pure: `Row`, `free`, `fit` with the best-fit GPU, `snapshot_of`), `queries.py` (`read_resources`, the one SELECT without a lock), `service.py` and `__init__.py` (`snapshot()`); no resource id cache (D-68); snapshot and fit share `free()`, and a missing cpu or ram row raises ValueError (D-69).
+- Tests: `tests/e3/test_placement.py` (10, no database, including 1,000 seeded cases where fit() must agree with Snapshot.fits) and `tests/e3/test_snapshot.py` (4, real PostgreSQL: S0 numbers, allocated, no lock, empty table).
+- Verified: 5 planted bugs each caught by its own file; full suite 231 passed; pyright 0 errors on the changed files; invariants 0 rows on orch.
+- A separate code review led to: allocate()'s FOR UPDATE in the no-lock test, the gpu_index key and id order tests, an agreement generator that reaches the GPU rule (210 of 1,000 cases, was 63), and D-68 naming every plan passage that still assumes the cache.
+- `docs/decisions.md`: D-68 and D-69 added.
 
 ## Code map
 
@@ -31,6 +32,7 @@ Last updated: 2026-11-19, end of slice E4-1.
 - `app/common/types.py`: `Vector`, `Snapshot.fits`, `Limits`, `Committed`, `Refused`, `Released`, `AlreadyReleased`, `User` (plan 5.3), `SubmitRequest`, `SubmitResult` (D-52), `QueueEntry` (D-53).
 - `app/common/ports.py`: `E1Port` to `E4Port` exactly as plan 5.4, `Engines`, `install(e)`, `engines()` (RuntimeError before install). `events.py`: the `Hub` protocol only (D-54). `errors.py`: `ApiError(status, error, field=None)`, `IllegalTransition`, `StopNotConfirmed`, `NotFound`. `logging.py`: `log.info/warning/error/exception(event, **fields)` and `configure(data_dir)`, JSON lines (D-58).
 - `app/e4_monitoring/state.py` (plan 7.1; no `__init__.py`, D-64): `JobState`, `set_actor(t, actor, reason)`, `clear_actor(t)`, `transition(t, job_id, to_state, actor, reason, extra=None, *, expected=None) -> datetime`. RuntimeError unless t is in an open transaction; its statements run on a cursor of its own inside `t.savepoint()`; JT001 or a job no longer in `expected` raise IllegalTransition (logged `illegal_transition`, transaction usable, nothing written); a missing job raises NotFound; every other error is re-raised unchanged. The event `{extra..., type, job_id, user_id, state, reason, at}` goes to `engines().e4.publish` after COMMIT; the six core keys win over extra (D-62).
+- `app/e3_allocation/` (plan 6.1, 6.2): `__init__.py` exports `snapshot` (allocate and release join in E3-2 and E3-3). `placement.py`, pure: `Kind`, `Row` (NamedTuple: resource_id, kind, gpu_index, total, reserved, allocated), `free(r)`, `fit(rows, need) -> ([(resource_id, amount)] in id order, gpu_index) | None` (best fit: least free VRAM that fits, ties to the lower resource_id; no GPU when vram_mib is 0), `snapshot_of(rows) -> Snapshot` (gpu_free by gpu_index); both raise ValueError on a missing cpu or ram row. `queries.py`: `read_resources(t) -> list[Row]`, no lock. `service.py`: `snapshot()`, one tx("E3"), no lock, no retry (D-68, D-69).
 - `db/roles.sql`: roles e1_role to e4_role (NOLOGIN) and the login orch_app (NOINHERIT, password `orch`, to change on the demo machine). Run once per cluster as a superuser (plan 4.1).
 - `db/schema.sql`: 15 tables, 17 foreign keys, CHECKs, triggers and grants (plan 4.2 with the D-40 fix). Custom error codes: JT001 illegal transition or a new job not in queued; JT002 jobs.state written (INSERT too) without the settings `app.actor` and `app.reason`; AO001 update or delete on an append-only table; FA001 session or problem owner who is not faculty; FA002 role change of a faculty member who owns sessions or problems; TR001 test result for a case outside the attempt's problem.
 - `db/seed.sql`: workload types, demo users, lab sessions 7 and 8, problem 12 with 10 cases, the S0 capacity (ids 1 CPU, 2 RAM, 3 and 4 GPUs); job ids start at 1042 (plan 4.3). `db/invariants.sql`: two queries, `-- name: invariants` and `-- name: leaks`; each returned row is one violation (plan 4.4).
@@ -39,7 +41,7 @@ Last updated: 2026-11-19, end of slice E4-1.
 - `scripts/reset_db.sh` (Linux or WSL2) and `scripts/reset_db.ps1` (Windows, D-38): stop first unless DATABASE_URL names DB_NAME (D-46), then roles, schema, seed, the DATA_DIR folders, the seed problems and capacity.py.
 - `tests/conftest.py`: each session runs roles.sql once, drops leftover `t_<12 hex>` databases, builds `orch_test` (schema and seed; fixtures `owner_tx`, `app_tx`, class `OpenTx` with `refused(sqlstate)`) and `orch_template` (schema only). Fixture `db` copies the template into a fresh database per test, opens the pool as orch_app (1 to 4 connections), installs the stubs and yields `TempDb(name, owner_url, app_url, stubs)`. Fixture `json_log` configures logging into tmp_path.
 - `tests/helpers.py`: `TempDb`, `assert_invariants(settled=False, unallocated=())` (excuses only the missing_allocation rows of the listed jobs, D-63), `invariant_queries()`, `make_user(role)`, `make_problem(cases=10)`, `make_job(state="queued", vector=...)` (every state through transition() on `PATH`, one tx() per step in the engine of plan 7.2); the test oracle `STATES`, `ACTOR` (the 13 transitions with their engine), `ALLOWED`. `tests/stubs.py`: `StubE1` to `StubE4`, `RecordingHub`, `install_stubs() -> Stubs`; each stub refuses calls inside a transaction (D-56).
-- Tests: `tests/test_config.py` (16), `tests/schema/` (69), `tests/common/` (46: test_tx 25, test_clock 4, test_ports 8, test_harness 8, test_logging 1), `tests/e4/` (86: test_transition).
+- Tests: `tests/test_config.py` (16), `tests/schema/` (69), `tests/common/` (46: test_tx 25, test_clock 4, test_ports 8, test_harness 8, test_logging 1), `tests/e4/` (86: test_transition), `tests/e3/` (14: test_placement 10, test_snapshot 4; its fixture `s0` loads db/seed.sql into a `db` copy).
 - `.env.example` (all 24 variables), `pyproject.toml` (pytest and pyright settings), `requirements*.txt` (`==` pins, D-36), `docker-compose.yml` (PostgreSQL 16, loopback only, D-37; fsync, synchronous_commit and full_page_writes off, D-66), `.gitattributes` (D-43).
 - `docs/`: `PROJECT_CONTEXT.md` (baseline, wins every conflict), `IMPLEMENTATION_PLAN.md` (build plan; 3.4 has the full file tree), `LAN_BUILD_GUIDE.md` (LAN slices only), `decisions.md`, `SUMMARY.md`.
 
@@ -52,22 +54,22 @@ python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements-dev.txt
 docker compose up -d db                                          # PostgreSQL 16, loopback only
 powershell -ExecutionPolicy Bypass -File scripts\reset_db.ps1    # database orch, data folders, capacity
-.venv\Scripts\pytest -q tests/e4 tests/common/test_harness.py   # E4-1's own files
+.venv\Scripts\pytest -q tests/schema tests/e3                   # E3 slices (plan 6.6)
 .venv\Scripts\pytest -q                                          # full suite; needs the db service
-.venv\Scripts\pyright.exe app/common app/e4_monitoring scripts/capacity.py tests/conftest.py tests/helpers.py tests/stubs.py tests/common tests/e4
+.venv\Scripts\pyright.exe app/common app/e3_allocation app/e4_monitoring scripts/capacity.py tests/conftest.py tests/helpers.py tests/stubs.py tests/common tests/e3 tests/e4
 Get-Content -Raw db\invariants.sql | docker compose exec -T db psql -U postgres -d orch
 ```
 
 Linux or WSL2: `python3 -m venv .venv && . .venv/bin/activate`, `pip install -r requirements-dev.txt`, `docker compose up -d db && ./scripts/reset_db.sh`, `pytest -q`, and `pytest -q -m docker` for the sandbox tests (needs cgroup v2: `stat -fc %T /sys/fs/cgroup` prints cgroup2fs).
 
 Last known results (2026-11-19, Windows 11, Python 3.13.5, PostgreSQL 16.16):
-- `pytest -q`: `217 passed` in about 64 s (16 config, 69 schema, 46 common, 86 e4).
-- pyright 1.1.414: 0 errors on the changed files. `db/invariants.sql` on orch: 0 rows for both queries.
+- `pytest -q`: `231 passed` in about 65 s (16 config, 69 schema, 46 common, 86 e4, 14 e3).
+- pyright 1.1.414: 0 errors on every path of the command above. `db/invariants.sql` on orch: 0 rows for both queries.
 - `pytest -q -m docker`: exit code 5 until docker tests exist. With the database down, the database tests fail (none skip) with: Start it with "docker compose up -d db".
 
 ## Decisions
 
-- Accepted: D-01, D-31, D-32, D-33, D-36 to D-67 (D-53 is a proposal). Rejected: D-34. Pending: D-35.
+- Accepted: D-01, D-31, D-32, D-33, D-36 to D-69 (D-53 is a proposal). Rejected: D-34. Pending: D-35.
 - D-01 to D-17: plan section 17. D-18 to D-30: LAN guide proposals.
 
 ## Gotchas and open items
@@ -82,7 +84,9 @@ Last known results (2026-11-19, Windows 11, Python 3.13.5, PostgreSQL 16.16):
 - For E2-1: submit() sets the settings with set_actor() for its INSERT; if its transaction goes on after the INSERT, it calls clear_actor().
 - Tests that count hub events take a baseline after make_job: each make_job step publishes one job_state event.
 - For E3-2 and E1: tx() only logs a failing after_commit hook (D-47). Dispatch must handle its own failure (end the attempt, release, requeue or fail the job), or the job stays allocated until a restart; every network call in a hook needs its own timeout.
-- For E3-1: plan 6.1 says capacity.py reloads E3's resource id cache, but capacity.py is a separate process. Run it only while the server is stopped, or E3 must re-read the ids.
+- For E3-2: there is no resource id cache (D-68). allocate() reads the ids with read_resources() inside its own transaction, runs the one lock statement and calls fit() only on the rows that statement returns. Put the lock statement in queries.py with the same column list as read_resources: Row(*r) maps by position, so another order mislabels columns. Plan 6.3's IDS and the 15.3 prompt's "cached id" are superseded.
+- For C-1: plan 12.1's main.py sketch builds E3Service() and calls e3.load_ids(), but plan 6.1 and E3-1 give module functions in app/e3_allocation and no cache (D-68): install the module, or a thin class around it, as the E3Port, and drop load_ids().
+- For E2-3: snapshot() raises ValueError when no capacity is loaded (D-69), and psycopg or pool errors when the database is down. The admission loop must catch them, log a lasting failure once per change rather than every 0.5 s, and keep looping.
 - For E2-3: FakeClock starts at 0.0; a test that compares `clock.time()` with database times (the 60 s guard reads submitted_at) starts it at the database's now. Tests sync with loops through `fake.wait_for_waiters(n)`.
 - For E2-1: the API's RAM bound 117,964 MiB is S0's (context §3). Under `--profile host` the real allocatable RAM differs.
 - For E1-1: a reset restarts job ids at 1042 but keeps `DATA_DIR/runs` and `payloads`, so a `runs/1042/` from an older database may exist. E1 must not trust an existing run folder.
@@ -103,5 +107,5 @@ Last known results (2026-11-19, Windows 11, Python 3.13.5, PostgreSQL 16.16):
 
 ## Next
 
-- Slice E3-1 (plan 14.1 order), then E3-2 (`allocate()`, needs E3-1 and E4-1). E2-1, E4-4 and E4-5 also need only what is built now (A-4 and E4-1).
+- Slice E3-2 (`allocate()`, plan 14.1 order; needs E3-1 and E4-1), then E3-3. E2-1, E4-4 and E4-5 also need only what is built now (A-4, E4-1 and E3-1).
 - In parallel: E2-2 (`queue.py`) needs only A-1 and no database.
