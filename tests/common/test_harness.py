@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from app.common.db import close_pool, init_pool, tx
-from tests.helpers import TempDb, assert_invariants, invariant_queries, make_job, make_problem
+from tests.helpers import ALLOWED, STATES, TempDb, assert_invariants, invariant_queries, make_job, make_problem
 
 
 def test_the_invariant_file_has_its_two_named_queries():
@@ -56,9 +56,36 @@ def test_make_job_inserts_one_queued_job_through_the_trigger(db: TempDb):
                                "nullif(current_setting('app.reason', true), '')").fetchone()
     assert history == [(None, "queued", "E2", "submitted")]
     assert state == ("queued",) and leftover == (None, None)
-    with pytest.raises(ValueError, match="queued"):
-        make_job(state="running")  # pyright: ignore[reportArgumentType]
     assert_invariants(settled=True)
+
+
+def test_make_job_reaches_every_state_through_transition(db: TempDb):
+    """Catches a factory that writes a state without transition() (no history row), walks a path
+    the trigger would refuse, or stops in the wrong state; later slices build test data on it."""
+    jobs = {state: make_job(state) for state in STATES}
+    with tx("E4") as cur:
+        for state, job in jobs.items():
+            row = cur.execute("SELECT state FROM jobs WHERE job_id = %s", (job,)).fetchone()
+            steps = cur.execute("SELECT from_state, to_state FROM job_state_history WHERE job_id = %s "
+                                "ORDER BY event_id", (job,)).fetchall()
+            assert row == (state,) and steps[0] == (None, "queued") and steps[-1][1] == state
+            assert all(old[1] == new[0] and (new[0], new[1]) in ALLOWED for old, new in zip(steps, steps[1:]))
+    assert_invariants(unallocated={jobs["allocated"], jobs["running"]})
+
+
+def test_unallocated_excuses_only_missing_allocation_rows_of_those_jobs(db: TempDb):
+    """Catches an excuse that is too wide: matching the check name alone would hide every job left
+    without an allocation, and dropping every row would hide all other violations."""
+    excused, other = make_job("allocated"), make_job("running")
+    assert_invariants(unallocated={excused, other})
+    with pytest.raises(AssertionError) as failed:
+        assert_invariants(unallocated={excused})
+    assert f"'missing_allocation', '{other}', 'running'" in str(failed.value)
+    assert f"'{excused}'" not in str(failed.value)
+    with tx("E3") as cur:
+        cur.execute("INSERT INTO resources (kind, total, reserved, allocated) VALUES ('cpu', 1000, 100, 5)")
+    with pytest.raises(AssertionError, match="allocated=5 held=0"):
+        assert_invariants(unallocated={excused, other})
 
 
 def test_make_problem_gives_a_faculty_owner_and_numbered_cases(db: TempDb):

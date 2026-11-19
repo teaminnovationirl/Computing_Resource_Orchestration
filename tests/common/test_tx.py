@@ -174,6 +174,28 @@ def test_nested_tx_is_refused_and_assert_outside_tx_raises_inside(db: TempDb):
     assert checked == ["hook"]
 
 
+def test_hooks_registered_in_a_savepoint_follow_its_outcome(db: TempDb):
+    """Catches hooks that outlive a rolled-back savepoint (its work is undone, yet the push still
+    goes out after COMMIT, D-67), including the hooks of an inner savepoint released before its
+    outer savepoint rolled back and a rollback by psycopg.Rollback, which leaves the block without
+    an exception; and hooks of a released savepoint that are lost or run twice."""
+    ran: list[str] = []
+    with tx("E2") as cur:
+        cur.after_commit(lambda: ran.append("before"))
+        with cur.savepoint():
+            cur.after_commit(lambda: ran.append("released"))
+        with pytest.raises(LookupError):
+            with cur.savepoint():
+                with cur.savepoint():
+                    cur.after_commit(lambda: ran.append("inner released, outer rolled back"))
+                raise LookupError
+        with cur.savepoint():
+            cur.after_commit(lambda: ran.append("rolled back by psycopg.Rollback"))
+            raise psycopg.Rollback
+        cur.after_commit(lambda: ran.append("after"))
+    assert ran == ["before", "released", "after"]
+
+
 def test_transactions_on_two_threads_are_not_nested(db: TempDb):
     """Catches a process-wide nesting flag: a second thread's tx() would be refused while the
     first one is open. Two threads, a Barrier, 100 runs."""
