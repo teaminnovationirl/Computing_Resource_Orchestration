@@ -13,7 +13,8 @@ _ROWS: Final = "SELECT resource_id, kind, gpu_index, total, reserved, allocated 
 
 
 class Job(NamedTuple):
-    """What allocate() reads of its job: the state it requires and what E1 needs for the dispatch."""
+    """What allocate() and release() read of their job: the state each requires and what E1 needs for
+    the dispatch."""
     state: str
     time_limit_s: int
     payload_path: str
@@ -76,3 +77,43 @@ def insert_audit(t: Tx, job_id: int, allocation_id: int | None, outcome: Literal
     (audit_refused_ck). The table is append-only (AO001)."""
     t.execute("INSERT INTO allocation_audit (job_id, allocation_id, action, outcome) "
               "VALUES (%s, %s, 'allocate', %s)", (job_id, allocation_id, outcome))
+
+
+def lock_open_allocation(t: Tx, job_id: int) -> int | None:
+    """Lock 1 of release() (invariant 2): the job's open allocation, FOR UPDATE, found through
+    allocations_one_open_uk; None when the job holds none. A second release() of the job waits here
+    until the first commits and then, under READ COMMITTED, finds the allocation closed: the open
+    allocation is the key that makes release() idempotent (context §7)."""
+    t.execute("SELECT allocation_id FROM allocations WHERE job_id = %s AND status = 'open' FOR UPDATE", (job_id,))
+    row = t.fetchone()
+    return None if row is None else row[0]
+
+
+def read_items(t: Tx, allocation_id: int) -> list[tuple[int, int]]:
+    """The allocation's (resource_id, amount) items in resource_id order, by primary key. Items never
+    change once written, and the caller holds the allocation's lock."""
+    t.execute("SELECT resource_id, amount FROM allocation_items WHERE allocation_id = %s ORDER BY resource_id",
+              (allocation_id,))
+    return [(resource_id, amount) for resource_id, amount in t.fetchall()]
+
+
+def subtract_allocated(t: Tx, items: list[tuple[int, int]]) -> None:
+    """Give every (resource_id, amount) back to resources.allocated in one statement. The caller holds
+    the row locks; resources_allocated_ck refuses a result below 0, so nothing is given back twice
+    unnoticed."""
+    t.execute("UPDATE resources AS r SET allocated = r.allocated - i.amount "
+              "FROM unnest(%s::int[], %s::int[]) AS i (resource_id, amount) WHERE r.resource_id = i.resource_id",
+              ([resource_id for resource_id, _ in items], [amount for _, amount in items]))
+
+
+def close_allocation(t: Tx, allocation_id: int) -> None:
+    """Mark the allocation released at the database time; allocations_released_ck pairs the two."""
+    t.execute("UPDATE allocations SET status = 'released', released_at = clock_timestamp() "
+              "WHERE allocation_id = %s", (allocation_id,))
+
+
+def insert_release_audit(t: Tx, job_id: int, allocation_id: int) -> None:
+    """The release audit row (FR-06): always committed and naming its allocation (audit_refused_ck,
+    audit_refused_allocate_ck). The table is append-only (AO001)."""
+    t.execute("INSERT INTO allocation_audit (job_id, allocation_id, action, outcome) "
+              "VALUES (%s, %s, 'release', 'committed')", (job_id, allocation_id))

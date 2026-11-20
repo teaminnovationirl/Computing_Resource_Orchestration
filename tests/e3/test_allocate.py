@@ -9,8 +9,6 @@ ids are 1 cpu, 2 ram, 3 gpu 0, 4 gpu 1. Each docstring names the bug the test ca
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +16,11 @@ import psycopg
 import pytest
 from psycopg import errors
 
-from app.common.db import Engine, Tx, tx
+from app.common.db import tx
 from app.common.errors import IllegalTransition, NotFound
 from app.common.types import Committed, Limits, Refused, Vector
 from app.e3_allocation import allocate, service
-from tests.helpers import TempDb, assert_invariants, make_job
+from tests.helpers import TempDb, assert_invariants, fail_at_end_of_body, make_job
 
 NOTHING_HELD = {1: 0, 2: 0, 3: 0, 4: 0}
 NO_SUCH_JOB = 999_999_999  # job ids start at 1042 and every test has a fresh database
@@ -64,23 +62,6 @@ def written(job: int) -> dict[str, list[tuple[Any, ...]]]:
 def logged(path: Path, event: str) -> list[dict[str, Any]]:
     return [record for record in map(json.loads, path.read_text(encoding="utf-8").splitlines())
             if record["event"] == event]
-
-
-def fail_at_end_of_body(monkeypatch: pytest.MonkeyPatch, *failures: Exception) -> None:
-    """Make allocate()'s transactions raise each failure in turn once the body has run, that is after
-    every write and every after_commit registration, inside the real tx(), which then rolls back. A
-    fault at the transaction boundary: the code under test runs unchanged."""
-    real = service.tx
-    pending = list(failures)
-
-    @contextmanager
-    def failing_tx(engine: Engine) -> Iterator[Tx]:
-        with real(engine) as t:
-            yield t
-            if pending:
-                raise pending.pop(0)
-
-    monkeypatch.setattr(service, "tx", failing_tx)
 
 
 def test_a_commit_writes_capacity_allocation_items_audit_and_move_together(s0: TempDb,

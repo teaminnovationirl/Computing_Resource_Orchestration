@@ -13,66 +13,19 @@ from __future__ import annotations
 import json
 import random
 import threading
-import time
-from collections.abc import Iterator
-from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
-from typing import Any, LiteralString
+from typing import Any
 
 import psycopg
-from psycopg import errors
 
 from app.common.db import close_pool, init_pool, tx
 from app.common.types import Committed, Refused, Vector
 from app.e3_allocation import allocate
-from tests.helpers import TempDb, assert_invariants, make_job
+from tests.helpers import TempDb, assert_invariants, gate, lockable, make_job, race, wait_until_waiting
 
 RUNS = 100
-CPU = 1
-
-
-@contextmanager
-def gate(db: TempDb) -> Iterator[None]:
-    """Hold the CPU row as allocate() does (FOR UPDATE) until the block ends."""
-    with psycopg.connect(db.owner_url) as conn:
-        conn.execute("SELECT 1 FROM resources WHERE resource_id = %s FOR UPDATE", (CPU,))
-        yield
-        conn.rollback()
-
-
-def wait_until_waiting(db: TempDb, count: int, futures: list[Future[Committed | Refused]]) -> None:
-    """Return once count sessions of this database wait on a lock, or as soon as a racer has ended
-    without waiting (its result then fails the test). While the gate holds the CPU row, the first row
-    allocate() locks, that row is the only lock a racer can wait on: the first racer waits on the
-    gate's transaction and each later one on the tuple lock of the racer ahead of it, so
-    pg_blocking_pids names the gate for the first racer only. Each poll is a transaction of its own:
-    pg_stat_activity stays fixed for the rest of a transaction."""
-    deadline = time.monotonic() + 10
-    with psycopg.connect(db.owner_url, autocommit=True) as watch:
-        while not any(future.done() for future in futures):
-            row = watch.execute("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
-                                "AND cardinality(pg_blocking_pids(pid)) > 0").fetchone()
-            if row is not None and row[0] >= count:
-                return
-            assert time.monotonic() < deadline, f"{count} allocate() calls never waited on the CPU row"
-
-
-def race(db: TempDb, pool: ThreadPoolExecutor,
-         requests: list[tuple[int, Vector]]) -> list[Committed | Refused | BaseException]:
-    """allocate() for every (job, vector) at once, released by one Barrier while the gate holds the
-    CPU row; the gate opens once every racer waits on it. Each outcome is the call's result or the
-    exception it raised."""
-    barrier = threading.Barrier(len(requests))
-
-    def run(job: int, need: Vector) -> Committed | Refused:
-        barrier.wait(timeout=10)
-        return allocate(job, need)
-
-    with gate(db):
-        futures = [pool.submit(run, job, need) for job, need in requests]
-        wait_until_waiting(db, len(requests), futures)
-    return [future.exception(timeout=30) or future.result() for future in futures]
 
 
 def add_gpu(total: int) -> int:
@@ -106,15 +59,6 @@ def audited(jobs: list[int]) -> list[str]:
             "SELECT outcome FROM allocation_audit WHERE job_id = ANY(%s) AND action = 'allocate'", (jobs,)).fetchall())
 
 
-def lockable(probe: psycopg.Connection[Any], query: LiteralString, key: int) -> bool:
-    """True when query, a FOR UPDATE NOWAIT on one row, gets its lock; autocommit lets go at once."""
-    try:
-        probe.execute(query, (key,))
-    except errors.LockNotAvailable:
-        return False
-    return True
-
-
 def locked_elsewhere(db: TempDb, job: int) -> list[str]:
     """Which of RAM, the two S0 GPUs and the job's row another session holds a lock on."""
     with psycopg.connect(db.owner_url, autocommit=True) as probe:
@@ -142,7 +86,7 @@ def test_two_requests_for_the_last_unit_exactly_one_commits(s0: TempDb):
         for _ in range(RUNS):
             gpu = add_gpu(20000)
             jobs = [make_job("admitted", need) for _ in range(2)]
-            outcomes = race(s0, pool, [(job, need) for job in jobs])
+            outcomes = race(s0, pool, [partial(allocate, job, need) for job in jobs])
             assert sorted(type(outcome).__name__ for outcome in outcomes) == ["Committed", "Refused"]
             assert [outcome.gpu_index for outcome in outcomes if isinstance(outcome, Committed)] == [gpu]
             assert gpu_held(gpu) == 18000  # total - reserved, and never more
@@ -161,7 +105,7 @@ def test_concurrent_gpu_requests_get_the_best_fit_of_the_locked_rows(s0: TempDb)
         for _ in range(RUNS):
             small, large = add_gpu(20000), add_gpu(30000)
             jobs = [make_job("admitted", need) for _ in range(2)]
-            outcomes = race(s0, pool, [(job, need) for job in jobs])
+            outcomes = race(s0, pool, [partial(allocate, job, need) for job in jobs])
             # allocation ids are drawn under the CPU row lock, so their order is the commit order
             committed = sorted((outcome for outcome in outcomes if isinstance(outcome, Committed)),
                                key=lambda outcome: outcome.allocation_id)
@@ -179,7 +123,7 @@ def test_the_same_job_allocated_twice_at_once_commits_once(s0: TempDb):
     with ThreadPoolExecutor(max_workers=2) as pool:
         for _ in range(RUNS):
             job = make_job("admitted", need)
-            outcomes = race(s0, pool, [(job, need), (job, need)])
+            outcomes = race(s0, pool, [partial(allocate, job, need)] * 2)
             assert sorted(type(outcome).__name__ for outcome in outcomes) == ["Committed", "IllegalTransition"]
             assert any(f"job {job} is allocated, not admitted" in str(outcome) for outcome in outcomes)
             assert audited([job]) == ["committed"]

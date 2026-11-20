@@ -1,16 +1,26 @@
-"""Test helpers (plan 5.6): the TempDb handle that the db fixture yields, assert_invariants() and the
-factories. Import this module as tests.helpers only: a second import path would load a second copy.
+"""Test helpers (plan 5.6): the TempDb handle that the db fixture yields, assert_invariants(), the
+factories and the race tools of the E3 tests. Import this module as tests.helpers only: a second import
+path would load a second copy.
 """
 from __future__ import annotations
 
 import secrets
+import threading
+import time
+from collections.abc import Callable, Iterator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Any, Final, LiteralString, TypeVar
 
-from app.common.db import Engine, tx
+import psycopg
+import pytest
+from psycopg import errors
+
+from app.common.db import Engine, Tx, tx
 from app.common.types import Committed, Vector
-from app.e3_allocation import allocate
+from app.e3_allocation import allocate, service
 from app.e4_monitoring.state import JobState, set_actor, transition
 from scripts.capacity import apply, s0_rows
 from tests.stubs import Stubs
@@ -153,3 +163,76 @@ def _allocate(job_id: int, vector: Vector) -> None:
             apply(cur, s0_rows())
     result = allocate(job_id, vector)
     assert isinstance(result, Committed), f"make_job: allocate() refused job {job_id}: {result}"
+
+
+# Races (E3-2, E3-3). Real threads call the engine on separate pooled connections; a gate holds the CPU
+# row, the first resource row every allocate() and release() locks (every job holds CPU), so each
+# interleaving happens every run, never by luck.
+CPU: Final = 1  # the cpu row of S0 (db/seed.sql)
+T = TypeVar("T")
+
+
+@contextmanager
+def gate(db: TempDb, resource_id: int = CPU) -> Iterator[None]:
+    """Hold resource_id as allocate() and release() do (FOR UPDATE) until the block ends."""
+    with psycopg.connect(db.owner_url) as conn:
+        conn.execute("SELECT 1 FROM resources WHERE resource_id = %s FOR UPDATE", (resource_id,))
+        yield
+        conn.rollback()
+
+
+def wait_until_waiting(db: TempDb, count: int, futures: Sequence[Future[Any]]) -> None:
+    """Return once count sessions of this database wait on a lock, or as soon as a racer has ended
+    without waiting (its result then fails the test). Every waiting session counts, not only those
+    waiting on the gate: the first racer to queue for a row waits on its holder, and each later one
+    on the tuple lock of the racer ahead of it, which pg_blocking_pids names instead of the holder.
+    Each poll is a transaction of its own: pg_stat_activity stays fixed for the rest of a transaction."""
+    deadline = time.monotonic() + 10
+    with psycopg.connect(db.owner_url, autocommit=True) as watch:
+        while not any(future.done() for future in futures):
+            row = watch.execute("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                                "AND cardinality(pg_blocking_pids(pid)) > 0").fetchone()
+            if row is not None and row[0] >= count:
+                return
+            assert time.monotonic() < deadline, f"{count} racers never waited on a lock"
+
+
+def race(db: TempDb, pool: ThreadPoolExecutor, calls: Sequence[Callable[[], T]]) -> list[T | BaseException]:
+    """Every call at once, released by one Barrier while the gate holds the CPU row; the gate opens
+    once every racer waits on a lock. Each outcome is the call's result or the exception it raised."""
+    barrier = threading.Barrier(len(calls))
+
+    def run(call: Callable[[], T]) -> T:
+        barrier.wait(timeout=10)
+        return call()
+
+    with gate(db):
+        futures = [pool.submit(run, call) for call in calls]
+        wait_until_waiting(db, len(calls), futures)
+    return [future.exception(timeout=30) or future.result() for future in futures]
+
+
+def lockable(probe: psycopg.Connection[Any], query: LiteralString, key: int) -> bool:
+    """True when query, a FOR UPDATE NOWAIT on one row, gets its lock; autocommit lets go at once."""
+    try:
+        probe.execute(query, (key,))
+    except errors.LockNotAvailable:
+        return False
+    return True
+
+
+def fail_at_end_of_body(monkeypatch: pytest.MonkeyPatch, *failures: Exception) -> None:
+    """Make the transactions of app.e3_allocation.service raise each failure in turn once the body has
+    run, that is after every write and every after_commit registration, inside the real tx(), which
+    then rolls back. A fault at the transaction boundary: the code under test runs unchanged."""
+    real = service.tx
+    pending = list(failures)
+
+    @contextmanager
+    def failing_tx(engine: Engine) -> Iterator[Tx]:
+        with real(engine) as t:
+            yield t
+            if pending:
+                raise pending.pop(0)
+
+    monkeypatch.setattr(service, "tx", failing_tx)
