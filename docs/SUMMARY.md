@@ -2,7 +2,7 @@
 
 Current state of the build. Rewrite a section when it changes; this is not a log. Read it first, then only the files it points to.
 
-Last updated: 2026-11-21, end of slice E2-1.
+Last updated: 2026-11-21, documentation update (D-88 to D-102), before slice E2-2.
 
 ## Status
 
@@ -11,16 +11,13 @@ Last updated: 2026-11-21, end of slice E2-1.
 | A-1 to A-4 | done: repository, roles, schema (D-40 fix), seed, invariants, reset scripts, capacity.py, `app/common`, test harness; the cgroup2fs check of A-1 is still open (see Gotchas) | merged to main (f0130cc) |
 | E4-1, E3-1, E3-2 | done: `state.py` (transition), `placement`, `queries`, `snapshot()`, `allocate()`; reviewed | merged to main (c5a4c68) |
 | E3-3 | done: `release()`, `tests/e3/test_release.py` (16), race tools in `tests/helpers.py`; reviewed | merged to main (bbc415d) |
-| E2-1 | done: `app/e2_scheduling/` (`validation`, `service`), `tests/e2/` (82), python_ml seed row and Config caps, `docs/PRODUCT_SPEC.md`; reviewed | slice/E2-1: "E2-1: validation and submit()"; not pushed or merged |
+| E2-1 | done: `app/e2_scheduling/` (`validation`, `service`), `tests/e2/` (82), python_ml seed row and Config caps, `docs/PRODUCT_SPEC.md`; reviewed | merged to main (a4e013e) |
 | all others | not started; order in Next | none |
 
-## Changes in the last session (2026-11-20 and 21, slice E2-1)
+## Changes in the last session (2026-11-21, documentation)
 
-- Scope change (D-82 to D-87): `docs/PRODUCT_SPEC.md` is binding (four languages, python_ml, three clients, notebook page, new slices N-1, L-1 to L-3, D-1, D-2; X-7 required); CLAUDE.md item 1, the Addendum and two rules now say so.
-- `E2Service.submit()` (plan 8.1, D-76 to D-80): reads types, problem, session and maxima on every request, validates in plan order with source_name and source last, writes `payloads/<hex>/<stored name>`, inserts with `insert_job()` and publishes job_state after COMMIT.
-- `SubmitRequest.source_name` (D-76); three python_ml caps in Config, `.env.example` and TABLE_3_3 (D-85); seed row python_ml (3, 3600); make_job inserts through `insert_job()`, same row as before (D-81).
-- Tests: `tests/e2/test_validation.py` (81 after the review) and `test_v1_batch.py` (1,000 requests, every decision right); 5 planted bugs each caught; type-only pyright fixes in `Config.from_env` and `tests/test_config.py`.
-- Review (one reviewer, then receiving-code-review): fixed a zip name hidden in a Unicode Path field, the entry cap now checked from the end record before parsing (D-85 budget), a zip version error that gave a 500, and 5 tests without assert_invariants; added tests for retries, a lost COMMIT acknowledgement, the session rule, the log lines and a DATA_DIR link; declined 3 more planted bugs (cap of 5) and an fsync per submit (proposal for X-5, D-80).
+- Scope (D-88 to D-102, `docs/PRODUCT_SPEC.md` rewritten, 10 sections): code workspace (LeetCode style) and practice runs (workload type code_run, `SubmitRequest.stdin`, new slice E2-5), notebook (Colab style), uploads spooled to `DATA_DIR/spool` with `E2Port.submit(user, req, source: Path)` from E2-5, downloads by FR-15 roles, HTTPS (LAN guide D-27), stack limits, laptop fallback.
+- Build slices D-1 and D-2 renamed W-1 and W-2 (D-89, also inside D-84); new build order and slice map (D-102); CLAUDE.md's product description updated (D-88).
 
 ## Code map
 
@@ -42,7 +39,7 @@ Last updated: 2026-11-21, end of slice E2-1.
 - `tests/helpers.py`: `TempDb`, `invariant_violations(settled=False)` (the rows), `assert_invariants(settled=False)`, `invariant_queries()`, `make_user(role)`, `make_problem(cases=10)`, `make_job(state="queued", vector=...)` (inserted with E2's `insert_job()`, D-81; every state on `PATH`, one tx() per step in the engine of plan 7.2; allocated and running jobs through e3 allocate() on S0, loaded when resources is empty, D-73); the test oracle `STATES`, `ACTOR` (the 13 transitions with their engine), `ALLOWED`; the race tools `CPU`, `gate(db, resource_id=CPU)`, `wait_until_waiting(db, count, futures)`, `race(db, pool, calls)` (outcomes or exceptions), `lockable(probe, query, key)`, `fail_at_end_of_body(monkeypatch, *failures)` (on app.e3_allocation.service.tx). `tests/stubs.py`: `StubE1` to `StubE4`, `RecordingHub`, `install_stubs() -> Stubs`; each stub refuses calls inside a transaction (D-56).
 - Tests: `tests/e2/` (82: test_validation 81, test_v1_batch 1; fixtures `seeded`, `e2` in `tests/e2/conftest.py`), `tests/test_config.py` (16), `tests/schema/` (69), `tests/common/` (46: test_tx 25, test_clock 4, test_ports 8, test_harness 8, test_logging 1), `tests/e4/` (86: test_transition), `tests/e3/` (49: test_placement 10, test_snapshot 4, test_allocate 14, test_e3_allocation 5, test_release 16; the fixture `s0` in `tests/e3/conftest.py` loads db/seed.sql into a `db` copy).
 - `.env.example` (all 27 variables), `pyproject.toml` (pytest and pyright settings), `requirements*.txt` (`==` pins, D-36), `docker-compose.yml` (PostgreSQL 16, loopback only, D-37; fsync, synchronous_commit and full_page_writes off, D-66), `.gitattributes` (D-43).
-- `docs/`: `PRODUCT_SPEC.md` (binding scope beyond the baseline; wins where it differs, D-82), `PROJECT_CONTEXT.md` (baseline), `IMPLEMENTATION_PLAN.md` (build plan; 3.4 has the full file tree), `LAN_BUILD_GUIDE.md` (LAN slices only), `decisions.md`, `SUMMARY.md`.
+- `docs/`: `PRODUCT_SPEC.md` (binding scope beyond the baseline; wins where it differs, D-82 to D-102), `PROJECT_CONTEXT.md` (baseline), `IMPLEMENTATION_PLAN.md` (build plan; 3.4 has the full file tree), `LAN_BUILD_GUIDE.md` (LAN slices only), `decisions.md`, `SUMMARY.md`.
 
 ## Run and test
 
@@ -69,13 +66,14 @@ Last known results (2026-11-21, Windows 11, Python 3.13.5, PostgreSQL 16.16):
 
 ## Decisions
 
-- Accepted: D-01, D-31, D-32, D-33, D-36 to D-86 (D-53 and D-85 are proposals); D-87 is a proposal. Rejected: D-34. Pending: D-35.
+- Accepted: D-01, D-31, D-32, D-33, D-36 to D-86, D-88 to D-99, D-101, D-102 (D-53 and D-85 are proposals; D-91, D-93, D-95 and D-96 carry proposals); D-87 and D-100 are proposals. Rejected: D-34. Pending: D-35.
 - D-01 to D-17: plan section 17. D-18 to D-30: LAN guide proposals.
 
 ## Gotchas and open items
 
 - For E2-2 and E2-3: put the queue push before submit()'s job_state hook and the loop wake after it (plan 8.1 step 4), under E2's RLock and never inside the transaction. A queued job larger than the current allocatable maximum (capacity.py run after it was submitted) never fits and would block the FCFS head forever.
-- For E4-3: build `SubmitRequest` with `source_name` from the multipart file name; parse form integers strictly, pass None for an absent or empty field, and turn a parse failure into 400 {field, error}, never FastAPI's 422; map ApiError to its status and anything else to a generic 500. Read at most the type's cap plus one byte: submit() takes bytes, so a python_ml upload (up to 1 GiB) sits in memory once per concurrent upload; propose spooling to a file before E4-3.
+- For E4-3: build `SubmitRequest` with `source_name` from the multipart file name; parse form integers strictly, pass None for an absent or empty field, and turn a parse failure into 400 {field, error}, never FastAPI's 422; map ApiError to its status and anything else to a generic 500. Uploads are spooled (D-90): stream each upload into `DATA_DIR/spool`, reading at most the type's cap plus one byte and never holding it whole in memory, pass submit() that file's Path (E2-5), and delete a spool file still there after submit() returns or raises.
+- For E2-5 (D-90, D-96): `E2Port.submit(user, req, source: Path)`. Refuse (ValueError, nothing written) a path that does not resolve inside `DATA_DIR/spool`, validate it in chunks (zipfile by path) and `os.replace` it into `payloads/<hex>/<stored name>`; spool and payloads share a drive, so the move is a rename, never a copy; create the spool folder in both reset scripts. Adapt the E2-1 tests to pass spooled files, with the same checks and the same expected results. stdin: at most 1 MiB, code_run only, stored as `input.txt` beside the source (E1-1 then finds two files in a code_run payload); seed row code_run (need class 3, max_time_limit_s 10).
 - For E1-1: `payload_path` is `payloads/<hex>` under DATA_DIR and holds exactly one of prog.c, prog.cpp, Main.java, prog.py or payload.zip, byte for byte as uploaded. E2 checked the zip on its declared sizes only: hold PYTHON_ML_UNZIPPED_MAX_BYTES and PYTHON_ML_MAX_ENTRIES on the bytes written and refuse absolute, '..' and link entries again while extracting, judged on the name zipfile extracts to (`filename`: the Unicode Path name when present, cut at a NUL); local headers may name entries differently from the directory, and a backslash separates folders only on Windows.
 - For E1-1: compile Main.java with javac; if no class Main can be run, the verdict is a compile error with the message "Java submissions must declare class Main". E1-1 owns the Java class tests (`public final class Main`, a tab between the words, no Main); E2 checks .java only for extension and size (D-79).
 - For E4-7: the startup reconciliation (startup only: a submit in progress owns a folder that no job names yet) deletes `DATA_DIR/payloads/<hex>` folders that no job names (a crash between the payload write and COMMIT, or a folder kept after submit_commit_unknown whose job did not commit).
@@ -114,6 +112,6 @@ Last known results (2026-11-21, Windows 11, Python 3.13.5, PostgreSQL 16.16):
 
 ## Next
 
-Build order (D-84, `docs/PRODUCT_SPEC.md` section 7): E2-1, E2-2, E2-3, E2-4; E1-1, E1-2 (fake sandbox); E4-2, E4-3, E4-4; E4-5, E4-6, E4-7; C-1 (SANDBOX_BACKEND=fake); C-2, C-3; N-1; E1-3, E1-4 on the lab PC; C-4; X-1 to X-7; L-1 to L-3; D-1, D-2. The table order of plan 14.1 is not required; every Needs column still holds and no slice is skipped.
+Build order (D-102, `docs/PRODUCT_SPEC.md` section 10): E2-1, E2-2, E2-3, E2-4, E2-5; E1-1, E1-2 (fake sandbox); E4-2, E4-3, E4-4; E4-5, E4-6, E4-7; C-1 (SANDBOX_BACKEND=fake); C-2, C-3; N-1; E1-3, E1-4 on the lab PC; C-4; X-1 to X-7; L-1 to L-3; W-1, W-2. The table order of plan 14.1 is not required; every Needs column still holds and no slice is skipped.
 
-- Next slice: E2-2 (`queue.py`, needs only A-1), then E2-3 and E2-4. Before any slice that `docs/PRODUCT_SPEC.md` names (section 6), read it.
+- Next slice: E2-2 (`queue.py`, needs only A-1), then E2-3, E2-4 and E2-5. Before any slice that `docs/PRODUCT_SPEC.md` names (section 9, the slice map), read it.

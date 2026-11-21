@@ -1,11 +1,14 @@
 # CLAUDE.md
 
 Product: Computing Resource Allocation & Utilization Orchestration System
-(Team 10 Mini Project, Theme 11). A LAN server where students submit jobs,
-mainly C programs to be compiled and judged, that compete for limited CPU,
-RAM and GPU memory. One FastAPI process with four engine modules, one
-PostgreSQL 16 database of 15 tables, one Docker container per job under
-cgroups v2.
+(Team 10 Mini Project, Theme 11). A LAN server where students submit C, C++,
+Java and Python programs that are judged in a LeetCode-style workspace or run
+with their own input, and Python ML/DL jobs from a Colab-style notebook on CPU
+or GPU, all competing for limited CPU, RAM and GPU memory. The clients are the
+browser version (desktop and phone) and two Windows programs (client and
+server), as docs/PRODUCT_SPEC.md defines. One FastAPI process with four engine
+modules, one PostgreSQL 16 database of 15 tables, one Docker container per job
+under cgroups v2.
 
 Read before writing code, in this order:
 1. docs/PROJECT_CONTEXT.md  baseline (FR-01..FR-15, NFR-01..NFR-10, schema,
