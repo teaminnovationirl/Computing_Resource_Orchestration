@@ -1,13 +1,15 @@
-"""E2 service (plan 8.1 with D-77, D-78 and D-80): submit() now; E2-2 to E2-4 add the queue, the
-admission loop, requeue, cancel, pause and policy to the same E2Service.
+"""E2 service (plan 8.1 with D-77, D-78 and D-80): submit() and the queue (E2-2, D-103 to D-105); E2-3
+and E2-4 add the admission loop, requeue, cancel, pause and policy to the same E2Service.
 
 submit() reads what validation needs in one transaction, validates, writes the source under
 DATA_DIR/payloads/<uuid4 hex>/ and inserts the queued job in a second tx("E2"). The state trigger
-writes the first history row; the job_state event leaves only after COMMIT (invariant 3).
+writes the first history row; the queue push and the job_state event happen only after COMMIT
+(invariant 3).
 """
 from __future__ import annotations
 
 import shutil
+import threading
 import uuid
 from datetime import datetime
 from functools import partial
@@ -19,8 +21,9 @@ from app.common.db import Tx, retrying, tx
 from app.common.errors import ApiError
 from app.common.logging import log
 from app.common.ports import engines
-from app.common.types import SubmitRequest, SubmitResult, User
+from app.common.types import QueueEntry, SubmitRequest, SubmitResult, User, Vector
 from app.config import Config
+from app.e2_scheduling.queue import JobQueue
 from app.e2_scheduling.validation import Accepted, FileName, Refs, Session, WorkloadType, validate
 from app.e4_monitoring.state import clear_actor, set_actor
 
@@ -40,12 +43,17 @@ class E2Service:
 
     def __init__(self, config: Config) -> None:
         self._config = config
+        # E2's one lock, the outermost in the process (D-104): taken before any transaction and never
+        # waited for while a database lock is held; the queue's methods take it too.
+        self.lock = threading.RLock()
+        self.queue = JobQueue(self.lock)
 
     def submit(self, user: User, req: SubmitRequest, source: bytes) -> SubmitResult:
         """Validate req and source and queue the job (message 2). A refused request raises ApiError(400,
         error, field) with no job, no payload and no event. Any other failure before COMMIT removes the
         payload folder and re-raises; a failure at COMMIT keeps it, because the job may be committed,
-        and logs submit_commit_unknown. RuntimeError when no capacity is loaded."""
+        and logs submit_commit_unknown. RuntimeError when no capacity is loaded. After COMMIT, in this
+        order: the submit log line, the queue push, the job_state event (D-105)."""
         start = _CLOCK.monotonic()
         refs = _read_refs(req)
         try:
@@ -64,6 +72,9 @@ class E2Service:
                 event = {"type": "job_state", "job_id": job_id, "user_id": user.user_id, "state": "queued",
                          "reason": "submitted", "at": submitted_at.isoformat()}
                 t.after_commit(partial(_log_submit, job_id, user.user_id, req.workload_type, accepted, start))
+                vector = Vector(req.cpu_millicores, req.ram_mib, req.vram_mib)
+                t.after_commit(partial(self.queue.push,
+                                       QueueEntry(job_id, user.user_id, accepted.need_class, submitted_at, vector)))
                 t.after_commit(partial(_publish, event))
                 reached_commit = True  # the body is done: what fails from here on is COMMIT itself
             return job_id

@@ -26,9 +26,9 @@ import psycopg
 import pytest
 from psycopg import errors
 
-from app.common.db import Engine, Tx, tx
+from app.common.db import Engine, Tx, in_transaction, tx
 from app.common.errors import ApiError
-from app.common.types import SubmitRequest, SubmitResult, User
+from app.common.types import QueueEntry, SubmitRequest, SubmitResult, User, Vector
 from app.config import Config
 from app.e2_scheduling import E2Service, service, validation
 from app.e2_scheduling.validation import Accepted, Refs, Session, WorkloadType, validate
@@ -405,6 +405,33 @@ def test_the_section_12_sample_queues_job_1042_with_its_payload_history_and_even
     assert_invariants(settled=True)
 
 
+def test_a_committed_submit_is_queued_after_commit_and_before_its_job_state_event(
+        e2: E2Service, seeded: TempDb, monkeypatch: pytest.MonkeyPatch):
+    """Catches the push left out, made inside the transaction (before COMMIT), made after the job_state
+    event (a page that refetches the queue on that event would miss the job), or made with the type's
+    class or Python's clock instead of the accepted class and the row's submitted_at (plan 8.1 step 4),
+    or with a lock of its own instead of E2's (D-104)."""
+    real_push, real_publish = e2.queue.push, service._publish
+    seen: list[tuple[str, bool]] = []
+
+    def push(entry: QueueEntry) -> None:
+        seen.append(("push", in_transaction()))
+        real_push(entry)
+
+    def publish(event: dict[str, Any]) -> None:
+        seen.append(("publish", event["job_id"] in e2.queue))
+        real_publish(event)
+
+    monkeypatch.setattr(e2.queue, "push", push)
+    monkeypatch.setattr(service, "_publish", publish)
+    assert e2.submit(STUDENT, SAMPLE, C_SOURCE) == SubmitResult(1042, "queued", 1)
+    assert seen == [("push", False), ("publish", True)]
+    submitted_at = job_row(1042)[12]
+    assert e2.queue.in_fifo_order() == [QueueEntry(1042, "01FE24BCS901", 1, submitted_at, Vector(1000, 512, 0))]
+    assert e2.queue._lock is e2.lock                         # E2's one lock (D-104), not a second one
+    assert_invariants(settled=True)
+
+
 def test_the_bounds_follow_the_capacity_loaded_in_resources(e2: E2Service, seeded: TempDb):
     """Catches S0's maxima written into the code or read once at start-up (SUMMARY gotcha): on S0 RAM
     stops at 117,964 MiB with the §12 text; after capacity.apply of a 4-core, 8 GiB host with no GPU,
@@ -443,8 +470,8 @@ def test_need_class_comes_from_the_session_and_the_type_never_from_the_role(e2: 
 
 
 def test_every_refusal_writes_no_job_no_folder_and_no_event(e2: E2Service, seeded: TempDb, tmp_path: Path):
-    """Catches a payload written before validation ends, a job inserted for a refused request, and a
-    session that closed an hour ago or opens in an hour taken as open."""
+    """Catches a payload written before validation ends, a job inserted or queued for a refused request,
+    and a session that closed an hour ago or opens in an hour taken as open."""
     closed = new_session("exam", "-2 hours", "-1 hour")
     future = new_session("exam", "1 hour", "2 hours")
     cases = [(change(workload_type="unknown"), C_SOURCE, ("workload_type", "must be one of code_eval, cpu_bound, "
@@ -463,7 +490,7 @@ def test_every_refusal_writes_no_job_no_folder_and_no_event(e2: E2Service, seede
         assert refused_by_submit(e2, req, source) == expected
     assert counts() == (0, 0)
     assert list(tmp_path.iterdir()) == []
-    assert seeded.stubs.hub.events == []
+    assert seeded.stubs.hub.events == [] and len(e2.queue) == 0
     assert_invariants(settled=True)
 
 
@@ -475,7 +502,7 @@ def test_a_failed_insert_leaves_no_job_and_removes_the_payload_folder(e2: E2Serv
         e2.submit(User("nobody_here", "student"), SAMPLE, C_SOURCE)
     assert counts() == (0, 0)
     assert list((tmp_path / "payloads").iterdir()) == []
-    assert seeded.stubs.hub.events == []
+    assert seeded.stubs.hub.events == [] and len(e2.queue) == 0
     assert_invariants(settled=True)
 
 
@@ -489,7 +516,8 @@ def test_a_failure_at_commit_keeps_the_payload_of_the_job_that_may_exist(
     """Catches the payload removed when COMMIT may have succeeded: here COMMIT succeeds and its
     acknowledgement is lost, so tx() raises before any hook runs, as after a real failed COMMIT.
     Deleting the folder would leave a queued job with no source: it stays, submit_commit_unknown names
-    it, and no job_state event goes out."""
+    it, and neither a job_state event nor a queue push goes out: the job waits for rebuild() at the next
+    start (E2-4)."""
     real_tx, real_commit = service.tx, psycopg.Connection.commit
     armed: list[bool] = []
 
@@ -514,7 +542,7 @@ def test_a_failure_at_commit_keeps_the_payload_of_the_job_that_may_exist(
     assert counts() == (1, 1)
     assert (tmp_path / payload_path / "prog.c").read_bytes() == C_SOURCE
     assert [line["payload_path"] for line in logged(json_log, "submit_commit_unknown")] == [payload_path]
-    assert seeded.stubs.hub.events == [] and logged(json_log, "submit") == []
+    assert seeded.stubs.hub.events == [] and logged(json_log, "submit") == [] and len(e2.queue) == 0
     assert_invariants(settled=True)
 
 
@@ -522,7 +550,7 @@ def test_a_deadlock_on_the_insert_replays_only_the_insert(e2: E2Service, seeded:
                                                           monkeypatch: pytest.MonkeyPatch):
     """Catches the payload written inside the retried transaction (one folder per attempt) and an event
     or a job left by the attempt that rolled back: the first INSERT dies with 40P01, retrying() runs the
-    transaction again, and the job, its folder and its event each exist once."""
+    transaction again, and the job, its folder, its event and its queue entry each exist once."""
     real_insert = service.insert_job
     deadlocks = [errors.DeadlockDetected("deadlock detected")]
 
@@ -536,6 +564,7 @@ def test_a_deadlock_on_the_insert_replays_only_the_insert(e2: E2Service, seeded:
     assert counts() == (1, 1)
     assert len(list((tmp_path / "payloads").iterdir())) == 1
     assert [event["job_id"] for event in seeded.stubs.hub.events] == [result.job_id]
+    assert [entry.job_id for entry in e2.queue.in_fifo_order()] == [result.job_id]
     assert_invariants(settled=True)
 
 
@@ -550,7 +579,7 @@ def test_retries_used_up_remove_the_payload_folder(e2: E2Service, seeded: TempDb
         e2.submit(STUDENT, SAMPLE, C_SOURCE)
     assert counts() == (0, 0)
     assert list((tmp_path / "payloads").iterdir()) == []
-    assert seeded.stubs.hub.events == []
+    assert seeded.stubs.hub.events == [] and len(e2.queue) == 0
     assert_invariants(settled=True)
 
 
@@ -659,7 +688,8 @@ RUNS = 100
 
 def test_two_concurrent_submits_get_distinct_job_ids_and_folders(e2: E2Service, seeded: TempDb, tmp_path: Path):
     """Catches shared state in E2Service or an id drawn in Python: two threads submit at the same moment
-    (a Barrier), 100 times; every job gets its own id, history row and payload folder."""
+    (a Barrier), 100 times; every job gets its own id, history row and payload folder, and the queue holds
+    all of them in the database's (submitted_at, job_id) order, whichever INSERT commits first."""
     results: list[SubmitResult] = []
     with ThreadPoolExecutor(max_workers=2) as pool:
         for _ in range(RUNS):
@@ -674,4 +704,7 @@ def test_two_concurrent_submits_get_distinct_job_ids_and_folders(e2: E2Service, 
     assert len({result.job_id for result in results}) == 2 * RUNS
     assert counts() == (2 * RUNS, 2 * RUNS)
     assert len(list((tmp_path / "payloads").glob("*/prog.c"))) == 2 * RUNS
+    with tx("E4") as cur:
+        arrival = [row[0] for row in cur.execute("SELECT job_id FROM jobs ORDER BY submitted_at, job_id")]
+    assert [entry.job_id for entry in e2.queue.in_fifo_order()] == arrival
     assert_invariants(settled=True)
