@@ -4,9 +4,12 @@ path would load a second copy.
 """
 from __future__ import annotations
 
+import io
 import secrets
+import stat
 import threading
 import time
+import zipfile
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
@@ -19,9 +22,10 @@ import pytest
 from psycopg import errors
 
 from app.common.db import Engine, Tx, tx
-from app.common.types import Committed, Vector
+from app.common.types import Committed, SubmitRequest, Vector
+from app.e2_scheduling.service import insert_job
 from app.e3_allocation import allocate, service
-from app.e4_monitoring.state import JobState, set_actor, transition
+from app.e4_monitoring.state import JobState, transition
 from scripts.capacity import apply, s0_rows
 from tests.stubs import Stubs
 
@@ -121,12 +125,30 @@ def make_problem(cases: int = 10) -> int:
     return problem_id
 
 
+def zip_of(files: dict[str, bytes], links: tuple[str, ...] = (), compression: int = zipfile.ZIP_STORED) -> bytes:
+    """A zip archive holding files and symbolic links (E2 tests). Each name is stored exactly as given:
+    ZipInfo would turn a backslash into a slash on Windows, so the name is set after it is built."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=compression) as archive:
+        for name, data in files.items():
+            info = zipfile.ZipInfo("placeholder")
+            info.filename = name
+            info.compress_type = compression
+            archive.writestr(info, data)
+        for name in links:
+            info = zipfile.ZipInfo(name)
+            info.external_attr = (stat.S_IFLNK | 0o777) << 16
+            archive.writestr(info, "main.py")
+    return buffer.getvalue()
+
+
 def make_job(state: JobState = "queued", vector: Vector = Vector(1000, 512)) -> int:
-    """A cpu_bound job of a new student in the given state; returns its job_id. E2 inserts it the
-    way submit() will: the state trigger demands app.actor and app.reason on the INSERT too
-    (JT002), so they are set for that one transaction only (D-51). Each step of PATH[state] then
-    runs in the engine that makes it (plan 7.2), so the trigger checks the test data too, and each
-    step publishes one job_state event to the stub hub. A job that ends allocated or running gets
+    """A cpu_bound job of a new student in the given state; returns its job_id. E2 inserts it with
+    insert_job(), the INSERT that submit() runs, which sets app.actor and app.reason for it (D-81).
+    It skips submit()'s validation and payload, so a test may ask allocate() for any vector and needs
+    no capacity loaded: the job is queued with need class 3 and payload_path payloads/test. Each step
+    of PATH[state] then runs in the engine that makes it (plan 7.2), so the trigger checks the test
+    data too, and each step publishes one job_state event to the stub hub. A job that ends allocated or running gets
     its allocation of vector from e3 allocate(), which also dispatches it to the stub E1 and
     publishes a capacity event; the S0 capacity is loaded first when resources is empty. Every
     other step runs through transition() in its own tx(), so completed, failed and released jobs
@@ -136,13 +158,8 @@ def make_job(state: JobState = "queued", vector: Vector = Vector(1000, 512)) -> 
     with tx("E2") as cur:
         cur.execute("INSERT INTO workload_types (type_code, default_need_class, max_time_limit_s) "
                     "VALUES ('cpu_bound', 3, 600) ON CONFLICT DO NOTHING")
-        set_actor(cur, "E2", "submitted")
-        row = cur.execute("INSERT INTO jobs (user_id, type_code, cpu_millicores, ram_mib, vram_mib, time_limit_s, "
-                          "need_class, payload_path) VALUES (%s, 'cpu_bound', %s, %s, %s, 5, 3, 'payloads/test') "
-                          "RETURNING job_id",
-                          (user_id, vector.cpu_millicores, vector.ram_mib, vector.vram_mib)).fetchone()
-    assert row is not None
-    job_id: int = row[0]
+        request = SubmitRequest("cpu_bound", vector.cpu_millicores, vector.ram_mib, vector.vram_mib, 5)
+        job_id, _ = insert_job(cur, user_id, request, 3, "payloads/test")
     current: JobState = "queued"
     for step in steps:
         engine = ACTOR[(current, step)]

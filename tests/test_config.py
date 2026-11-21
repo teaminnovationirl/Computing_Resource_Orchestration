@@ -9,7 +9,7 @@ from app.config import Config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# Plan section 3.3: every variable with its default.
+# Plan section 3.3, and the python_ml caps of D-85: every variable with its default.
 TABLE_3_3 = {
     "DATABASE_URL": "postgresql://orch_app:orch@localhost:5432/orch",
     "ADMIN_DATABASE_URL": "postgresql://postgres:postgres@localhost:5432/postgres",
@@ -29,6 +29,9 @@ TABLE_3_3 = {
     "DEFAULT_POLICY": "fcfs",
     "TOKEN_TTL_S": 28800,
     "SOURCE_MAX_BYTES": 65536,
+    "PYTHON_ML_UPLOAD_MAX_BYTES": 1073741824,
+    "PYTHON_ML_UNZIPPED_MAX_BYTES": 4294967296,
+    "PYTHON_ML_MAX_ENTRIES": 10000,
     "OUTPUT_CAP_BYTES": 65536,
     "COMPILE_TIMEOUT_S": 10,
     "STOP_CONFIRM_TIMEOUT_S": 10,
@@ -84,7 +87,7 @@ def test_from_env_reads_the_process_environment_by_default(monkeypatch):
 def test_config_is_frozen():
     config = Config()
     with pytest.raises(dataclasses.FrozenInstanceError):
-        config.heartbeat_s = 5.0
+        setattr(config, "heartbeat_s", 5.0)  # what an assignment does, without the type error
 
 
 @pytest.mark.parametrize(
