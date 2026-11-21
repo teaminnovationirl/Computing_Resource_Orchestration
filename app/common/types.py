@@ -5,7 +5,7 @@ docs/decisions.md D-52); QueueEntry is a proposal (D-53).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
 
@@ -68,7 +68,9 @@ class User:
 
 @dataclass(frozen=True)
 class SubmitRequest:
-    """An authenticated job request (message 2) without its source, which travels as bytes."""
+    """An authenticated job request (message 2) without its source, which travels as bytes.
+    source_name is the uploaded file's name; E2 uses only its extension and never stores it or puts it
+    in a path, and "" means the name was not given (D-76)."""
     workload_type: str
     cpu_millicores: int
     ram_mib: int
@@ -76,6 +78,7 @@ class SubmitRequest:
     time_limit_s: int
     problem_id: int | None = None
     lab_session_id: int | None = None
+    source_name: str = field(default="", kw_only=True, repr=False)  # repr=False: never in a log (D-76)
 
 
 @dataclass(frozen=True)

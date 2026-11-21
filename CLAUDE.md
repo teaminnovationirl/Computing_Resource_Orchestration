@@ -9,7 +9,8 @@ cgroups v2.
 
 Read before writing code, in this order:
 1. docs/PROJECT_CONTEXT.md  baseline (FR-01..FR-15, NFR-01..NFR-10, schema,
-   messages, states). It wins over everything else.
+   messages, states). It wins over everything else, except where
+   docs/PRODUCT_SPEC.md records a scope decision of mine (see Addendum).
 2. docs/IMPLEMENTATION_PLAN.md  the build plan. Work only on the slice named
    in the prompt (for example E3-2) and read only the sections it cites.
 3. docs/decisions.md  decisions already taken. Append one line per new one.
@@ -58,7 +59,8 @@ another engine's internal modules.
 - Inside tx(), take savepoints only with t.savepoint(), never connection.transaction() directly:
   t.savepoint() also drops the after_commit hooks of work it rolls back (D-67).
 - Never shell=True. Every file path must resolve inside DATA_DIR.
-- No new tables, columns, endpoints or libraries unless the plan lists them.
+- No new tables, columns, endpoints or libraries unless the plan or
+  docs/PRODUCT_SPEC.md lists them.
   If the plan or the baseline looks wrong, stop and report in 3 lines
   (what, evidence, proposed fix) and wait.
 - Numbers come from the baseline. Anything else is a proposal: log it.
@@ -88,7 +90,8 @@ slice's run command works from a clean checkout.
 ## Addendum (overrides anything above that conflicts)
 
 - Package names follow docs/IMPLEMENTATION_PLAN.md section 3.4: app/e1_execution, app/e2_scheduling, app/e3_allocation, app/e4_monitoring. Ignore the folder names in docs/LAN_BUILD_GUIDE.md.
-- Never read a whole document. Read only the sections the slice prompt names. docs/PROJECT_CONTEXT.md is the baseline and wins every conflict.
+- Never read a whole document except docs/PRODUCT_SPEC.md. Read only the sections the slice prompt names. docs/PROJECT_CONTEXT.md is the baseline and wins every conflict, except where docs/PRODUCT_SPEC.md records a scope decision of mine.
+- Read docs/PRODUCT_SPEC.md before any slice it names. It records scope I decided beyond the baseline; where it differs from the plan or the baseline it wins, and each difference is logged in decisions.md.
 - docs/LAN_BUILD_GUIDE.md is only for LAN, agent, discovery, isolate and deployment slices, and only the section the prompt names. Where it differs from the plan, docs/decisions.md decides.
 - Liveness and heartbeat SQL uses clock_timestamp(), never now().
 - Live updates are published by transition() after commit. Do not add pg_notify triggers unless docs/decisions.md says so.

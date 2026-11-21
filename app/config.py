@@ -8,10 +8,10 @@ decision line in docs/decisions.md.
 
 import math
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Self
+from typing import Any, Self, cast
 
 # Allowed values of the variables that name a mode.
 CHOICES: dict[str, tuple[str, ...]] = {
@@ -47,6 +47,11 @@ class Config:
     # Proposals.
     token_ttl_s: float = 28800.0  # 8 h
     source_max_bytes: int = 65536
+    # python_ml uploads (D-85): one .py or one .zip; the zip's caps count its entries and the sizes
+    # they declare.
+    python_ml_upload_max_bytes: int = 1073741824  # 1 GiB
+    python_ml_unzipped_max_bytes: int = 4294967296  # 4 GiB
+    python_ml_max_entries: int = 10000
     output_cap_bytes: int = 65536  # per test case
     compile_timeout_s: float = 10.0
     stop_confirm_timeout_s: float = 10.0
@@ -70,7 +75,7 @@ class Config:
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> Self:
         """Build a Config from env. A variable that is not set keeps its default."""
-        values: dict[str, object] = {}
+        values: dict[str, Any] = {}
         for f in fields(cls):
             name = f.name.upper()
             raw = env.get(name)
@@ -79,8 +84,9 @@ class Config:
             text = raw.strip()
             if not text:
                 raise ValueError(f"{name} is set but empty")
+            parse = cast(Callable[[str], object], f.type)  # the annotation itself: str, Path, int or float
             try:
-                values[f.name] = f.type(text)
+                values[f.name] = parse(text)
             except ValueError as exc:
                 kind = "a whole number" if f.type is int else "a number"
                 raise ValueError(f"{name} must be {kind}, got {raw!r}") from exc
