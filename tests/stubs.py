@@ -97,17 +97,21 @@ class StubE2(_Recorder):
 
 
 class StubE3(_Recorder):
-    """snapshot gives snapshot_value (the S0 seed); allocate gives the scripted allocate_results in
-    order; release gives Released once per committed job, then AlreadyReleased (invariant 4)."""
+    """snapshot gives snapshot_value (the S0 seed), or raises snapshot_error while one is set; allocate
+    gives the scripted allocate_results in order and raises an item that is an exception; release gives
+    Released once per committed job, then AlreadyReleased (invariant 4)."""
 
     def __init__(self) -> None:
         super().__init__()
         self.snapshot_value = s0_free()
-        self.allocate_results: list[Committed | Refused] = []
+        self.snapshot_error: Exception | None = None
+        self.allocate_results: list[Committed | Refused | Exception] = []
         self._open: dict[int, int] = {}  # job_id -> allocation_id
 
     def snapshot(self) -> Snapshot:
         self._record("snapshot")
+        if self.snapshot_error is not None:
+            raise self.snapshot_error
         return self.snapshot_value
 
     def allocate(self, job_id: int, vector: Vector) -> Committed | Refused:
@@ -116,6 +120,8 @@ class StubE3(_Recorder):
             if not self.allocate_results:
                 raise AssertionError("StubE3.allocate: no result scripted")
             result = self.allocate_results.pop(0)
+            if isinstance(result, Exception):
+                raise result
             if isinstance(result, Committed):
                 self._open[job_id] = result.allocation_id
             return result
