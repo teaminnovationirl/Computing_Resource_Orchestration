@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import cast
@@ -277,10 +278,10 @@ def test_the_cycle_line_is_info_only_when_the_cycle_changed_something_or_held_th
         ("blocked", 0.0), ("blocked", 200.0)]
 
 
-def test_a_submit_wakes_the_loop(e2_stubbed: E2Service):
+def test_a_submit_wakes_the_loop(e2_stubbed: E2Service, spool: Callable[[bytes], Path]):
     assert not e2_stubbed.wake.is_set()
     e2_stubbed.submit(User("01FE24BCS901", "student"),
-                      SubmitRequest("cpu_bound", 100, 64, 0, 5, source_name="prog.py"), b"print(42)\n")
+                      SubmitRequest("cpu_bound", 100, 64, 0, 5, source_name="prog.py"), spool(b"print(42)\n"))
     assert e2_stubbed.wake.is_set()
 
 

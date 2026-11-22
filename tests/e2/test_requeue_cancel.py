@@ -475,26 +475,33 @@ def test_a_requeue_from_inside_an_admission_cycle_on_its_thread_is_refused_loudl
 
 
 def test_no_resync_can_run_between_a_submits_commit_and_its_push(
-        e2_stubbed: E2Service, json_log: Path, monkeypatch: pytest.MonkeyPatch):
+        e2_stubbed: E2Service, json_log: Path, monkeypatch: pytest.MonkeyPatch, spool: Callable[[bytes], Path]):
     """Catches the race of D-106: submit()'s first hook after COMMIT runs with E2's lock still held, so a resync
     (or a cancel, or a cycle) tried there cannot push the job first, which would make submit's own push raise
-    ValueError. Also catches the lock taken before validate(): a large upload would hold every submit and the
-    admission loop (it is taken only around the insert). The submit line tells lock waits from database time."""
+    ValueError. Also catches the lock taken before validate() or before the move of the spooled upload and the
+    write of input.txt: a large upload would hold every submit and the admission loop (it is taken only around
+    the insert, D-125). The submit line tells lock waits from database time."""
     tried: list[tuple[str, bool]] = []
     real_validate, real_log = service.validate, service._log_submit
+    real_write = E2Service._write_payload  # pyright: ignore[reportPrivateUsage]
 
     def validate(*args: Any) -> Any:
         tried.append(("validate", lock_free_elsewhere(e2_stubbed)))
         return real_validate(*args)
+
+    def write_payload(self: E2Service, *args: Any) -> Any:
+        tried.append(("move", lock_free_elsewhere(e2_stubbed)))
+        return real_write(self, *args)
 
     def log_submit(*args: Any) -> None:
         tried.append(("committed", resync_elsewhere(e2_stubbed)))
         real_log(*args)
 
     monkeypatch.setattr(service, "validate", validate)
+    monkeypatch.setattr(E2Service, "_write_payload", write_payload)
     monkeypatch.setattr(service, "_log_submit", log_submit)
-    result = e2_stubbed.submit(STUDENT, REQUEST, b"print(1)\n")
-    assert tried == [("validate", True), ("committed", False)]
+    result = e2_stubbed.submit(STUDENT, REQUEST, spool(b"print(1)\n"))
+    assert tried == [("validate", True), ("move", True), ("committed", False)]
     assert ids(e2_stubbed.queue.in_fifo_order()) == [result.job_id]
     assert logged(json_log, "after_commit_failed") == []
     [line] = logged(json_log, "submit")

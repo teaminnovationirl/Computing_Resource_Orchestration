@@ -57,7 +57,9 @@ try {
     Invoke-Psql -Database $db -File db\schema.sql
     Invoke-Psql -Database $db -File db\seed.sql
     Write-Output "Database $db rebuilt from db\roles.sql, db\schema.sql and db\seed.sql."
-    foreach ($folder in 'problems', 'payloads', 'runs', 'logs') {
+    # spool: uploads waiting for submit(), on the same drive as payloads so the move is a rename (D-90);
+    # it keeps the NTFS permissions of DATA_DIR (reset_db.sh makes it 700 on Linux)
+    foreach ($folder in 'problems', 'payloads', 'runs', 'logs', 'spool') {
         New-Item -ItemType Directory -Force -Path (Join-Path $data $folder) | Out-Null
     }
     Copy-Item -Path seed_data\problems\* -Destination (Join-Path $data 'problems') -Recurse -Force

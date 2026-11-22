@@ -195,20 +195,21 @@ def test_ten_releases_at_once_run_cycles_one_at_a_time_on_the_loop_thread(
     assert_invariants()
 
 
-def race_once(pool: ThreadPoolExecutor, e2: E2Service, watch: psycopg.Connection[tuple[object, ...]]) -> None:
+def race_once(pool: ThreadPoolExecutor, e2: E2Service, watch: psycopg.Connection[tuple[object, ...]],
+              spool: Callable[[bytes], Path]) -> None:
     """One run: a job waits; then a cycle, a second submit, a release and a cancel of the waiting job start
     together behind a Barrier (D-104, D-118). The cancel either wins (cancelled, nothing ever allocated) or
     finds the job allocated by the cycle and answers False; it never lands between admitted and allocate(),
     where it would raise IllegalTransition (D-122) and fail this run."""
     holder = make_job("running", SMALL)
-    waiting = e2.submit(STUDENT, REQUEST, b"print(1)\n").job_id
+    waiting = e2.submit(STUDENT, REQUEST, spool(b"print(1)\n")).job_id
     barrier = threading.Barrier(4)
 
     def at_once(call: Callable[[], object]) -> object:
         barrier.wait(10)
         return call()
 
-    calls: list[Callable[[], object]] = [e2.run_cycle, partial(e2.submit, STUDENT, REQUEST, b"print(2)\n"),
+    calls: list[Callable[[], object]] = [e2.run_cycle, partial(e2.submit, STUDENT, REQUEST, spool(b"print(2)\n")),
                                          partial(release_job, holder), partial(e2.cancel_queued, waiting, "ADM001")]
     results = [future.result(timeout=30) for future in [pool.submit(at_once, call) for call in calls]]
     e2.run_cycle()  # admit what the race left queued
@@ -221,8 +222,9 @@ def race_once(pool: ThreadPoolExecutor, e2: E2Service, watch: psycopg.Connection
     assert watch.execute("SELECT job_id FROM allocations GROUP BY job_id HAVING count(*) > 1").fetchall() == []
 
 
-def test_a_cycle_a_submit_a_release_and_a_cancel_at_once_100_times(e2_real: E2Service, seeded: TempDb):
+def test_a_cycle_a_submit_a_release_and_a_cancel_at_once_100_times(e2_real: E2Service, seeded: TempDb,
+                                                                   spool: Callable[[bytes], Path]):
     with psycopg.connect(seeded.owner_url, autocommit=True) as watch, ThreadPoolExecutor(4) as pool:
         for _ in range(100):
-            race_once(pool, e2_real, watch)
+            race_once(pool, e2_real, watch, spool)
     assert_invariants()

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import random
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -105,7 +106,10 @@ def new_session(opens_in: str, closes_in: str) -> int:
     return row[0]
 
 
-def test_v1_every_decision_of_1000_requests_is_right(e2: E2Service, seeded: TempDb, tmp_path: Path):
+def test_v1_every_decision_of_1000_requests_is_right(e2: E2Service, seeded: TempDb, tmp_path: Path,
+                                                     spool: Callable[[bytes], Path]):
+    """Each source travels as a spooled file (D-90); at the end every accepted upload has left the spool for its
+    payload folder and every refused one is still there, untouched, for E4-3 to delete."""
     closed, future = new_session("-2 hours", "-1 hour"), new_session("1 hour", "2 hours")
     rng = random.Random(1042)
     broken_at = set(rng.sample(range(TOTAL), BROKEN))
@@ -121,10 +125,14 @@ def test_v1_every_decision_of_1000_requests_is_right(e2: E2Service, seeded: Temp
     assert {case.broken for case in cases} == {None, *FIELDS}  # the batch breaks every field
 
     wrong: list[tuple[int, str | None, str]] = []
+    left: dict[Path, bytes] = {}  # the refused uploads, which submit() must leave in the spool
     for i, case in enumerate(cases):
+        source = spool(case.source) if isinstance(case.source, bytes) else case.source
         try:
-            result = e2.submit(USERS[i % len(USERS)], case.req, case.source)
+            result = e2.submit(USERS[i % len(USERS)], case.req, source)
         except ApiError as refusal:
+            if isinstance(source, Path):
+                left[source] = case.source
             if refusal.field != case.broken:
                 wrong.append((i, case.broken, f"400 {refusal.field}: {refusal.error}"))
             continue
@@ -137,4 +145,5 @@ def test_v1_every_decision_of_1000_requests_is_right(e2: E2Service, seeded: Temp
         row = cur.execute("SELECT count(*) FROM jobs").fetchone()
     assert row == (TOTAL - BROKEN,)
     assert len(list((tmp_path / "payloads").iterdir())) == TOTAL - BROKEN
+    assert {path: path.read_bytes() for path in (tmp_path / "spool").iterdir()} == left
     assert_invariants(settled=True)

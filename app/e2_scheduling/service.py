@@ -3,13 +3,15 @@ admission cycle run_cycle() with capacity_changed() (E2-3, plan 8.3, D-116 to D-
 cancel_queued, pause and resume, set_policy, rebuild, the resync and queue_view (E2-4, plan 8.4, D-121 to
 D-127), all on one E2Service.
 
-submit() reads what validation needs in one transaction, validates, writes the source under
-DATA_DIR/payloads/<uuid4 hex>/ and inserts the queued job in a second tx("E2"). The state trigger
-writes the first history row; the queue push, the job_state event and the wake of the admission loop
-happen only after COMMIT (invariant 3).
+submit() checks that its source is a plain file directly in DATA_DIR/spool (D-90), reads what
+validation needs in one transaction, validates, moves the upload into DATA_DIR/payloads/<uuid4 hex>/
+(with input.txt for a practice run, D-96) and inserts the queued job in a second tx("E2"). The state
+trigger writes the first history row; the queue push, the job_state event and the wake of the
+admission loop happen only after COMMIT (invariant 3).
 """
 from __future__ import annotations
 
+import os
 import shutil
 import threading
 import uuid
@@ -19,7 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from app.common.clock import Clock, RealClock
 from app.common.db import Tx, assert_outside_tx, retrying, tx
@@ -30,13 +32,18 @@ from app.common.types import Committed, QueueEntry, Refused, Snapshot, SubmitReq
 from app.config import Config
 from app.e2_scheduling.policy import Policy, as_policy, in_policy_order, oversized, select_fcfs, select_need
 from app.e2_scheduling.queue import JobQueue
-from app.e2_scheduling.validation import Accepted, FileName, Refs, Session, WorkloadType, validate
+from app.e2_scheduling.validation import (CODE_RUN, INPUT_FILE, Accepted, FileName, Refs, Session, WorkloadType,
+                                          validate)
 from app.e4_monitoring.state import JobState, clear_actor, set_actor, transition
 
 _CLOCK: Final = RealClock()
 SLOW_CYCLE_MS: Final = 100.0  # a cycle that holds E2's lock longer logs at INFO (proposal, D-119)
 OVERSIZED: Final = "larger than the server's capacity"  # the reason of the cancel of D-116
 RESYNC_S: Final = 30.0  # the periodic resync of D-106 (proposal): how often run_cycle() looks for orphans
+# A payload folder and its files, readable by the sandbox user 65534 behind E1's read-only mount (plan 9.3)
+# and written by the server alone; on Windows chmod only sets or clears the read-only flag.
+PAYLOAD_FOLDER_MODE: Final = 0o755
+PAYLOAD_FILE_MODE: Final = 0o644
 _STATE: Final = "SELECT state FROM jobs WHERE job_id = %s"
 _LOCK_STATE: Final = "SELECT state FROM jobs WHERE job_id = %s FOR UPDATE"
 _LOCK_JOB: Final = ("SELECT state, retry_count, user_id, need_class, submitted_at, cpu_millicores, ram_mib, vram_mib "
@@ -93,26 +100,38 @@ class E2Service:
         self._shown: _Admission = self._admission_state()
         self._failed_state: _Admission | None = None
 
-    def submit(self, user: User, req: SubmitRequest, source: bytes) -> SubmitResult:
-        """Validate req and source and queue the job (message 2). A refused request raises ApiError(400,
-        error, field) with no job, no payload and no event. Any other failure before COMMIT removes the
-        payload folder and re-raises; a failure at COMMIT keeps it, because the job may be committed,
-        and logs submit_commit_unknown. RuntimeError when no capacity is loaded. After COMMIT, in this
-        order: the submit log line, the queue push, the job_state event (D-105), the wake of the
-        admission loop.
+    def submit(self, user: User, req: SubmitRequest, source: Path) -> SubmitResult:
+        """Validate req and the spooled upload at source and queue the job (message 2). A source that does
+        not resolve to a plain file with one name directly in DATA_DIR/spool raises ValueError before anything
+        is read or written (D-90). A refused request raises ApiError(400, error, field) with no job, no
+        payload and no event. After either, and after any failure before the move, the upload stays where
+        it was for E4-3 to delete. An accepted upload is moved (renamed, never copied) into
+        DATA_DIR/payloads/<hex>/, with input.txt beside it for code_run (D-96). Any other failure before
+        COMMIT removes the payload folder, logs submit_failed at ERROR with its traceback and re-raises; a
+        failure at COMMIT keeps the folder, because the job may be committed, and logs submit_commit_unknown
+        at ERROR (as D-121). RuntimeError when no capacity is loaded. After COMMIT, in this order: the submit
+        log line, the queue push, the job_state event (D-105), the wake of the admission loop.
 
         E2's lock is held only around the insert transaction and those hooks (D-125), so no resync, cancel
-        or cycle runs between the COMMIT and the push; reading, validating and writing the payload happen
-        before it is taken, so a large upload never holds the admission loop or another submit."""
+        or cycle runs between the COMMIT and the push; checking, reading, validating and moving the upload
+        happen before it is taken, so a large upload never holds the admission loop or another submit."""
         assert_outside_tx("e2.submit")
         start = _CLOCK.monotonic()
-        refs = _read_refs(req)
         try:
-            accepted = validate(req, source, refs, self._config)
+            spooled = self._spooled(source)
+            refs = _read_refs(req)
+            accepted = validate(req, spooled, refs, self._config)
+            stdin = (req.stdin or b"") if req.workload_type == CODE_RUN else None  # validate() refused any other
+            # validate() refused every source that is not a Path, so spooled is the resolved upload here.
+            folder, payload_path = self._write_payload(cast(Path, spooled), accepted.file_name, stdin)
         except ApiError as refusal:
             log.info("submit_refused", engine="E2", user_id=user.user_id, field=refusal.field, error=refusal.error)
             raise
-        folder, payload_path = self._write_payload(source, accepted.file_name)
+        except Exception:
+            # Not the user's: a source outside the spool, the database, the disk. _write_payload() has removed
+            # any folder it made, so none is named here.
+            log.exception("submit_failed", engine="E2", user_id=user.user_id, payload_path=None)
+            raise
         reached_commit = False
 
         def insert_once(asked: float, locked: float) -> int:
@@ -138,9 +157,10 @@ class E2Service:
                 job_id = retrying(partial(insert_once, asked, _CLOCK.monotonic()))
         except BaseException:
             if reached_commit:
-                log.warning("submit_commit_unknown", engine="E2", user_id=user.user_id, payload_path=payload_path)
+                log.exception("submit_commit_unknown", engine="E2", user_id=user.user_id, payload_path=payload_path)
             else:
                 _remove(folder)
+                log.exception("submit_failed", engine="E2", user_id=user.user_id, payload_path=payload_path)
             raise
         return SubmitResult(job_id, "queued", accepted.need_class)
 
@@ -523,9 +543,30 @@ class E2Service:
              queued=len(self.queue), policy=self._policy, waited_ms=round(waited_s * 1000, 1), held_ms=held_ms)
         self._show_admission()  # never raises: a failed push is logged (D-123)
 
-    def _write_payload(self, source: bytes, file_name: FileName) -> tuple[Path, str]:
-        """DATA_DIR/payloads/<uuid4 hex>/<file_name>, created new; the folder is what E1 mounts read-only.
-        Returns the folder and payload_path, the folder relative to DATA_DIR."""
+    def _spooled(self, source: object) -> object:
+        """The upload at source with every link resolved: validate() reads that path and _write_payload()
+        moves it, never the path as given, so a link can never be validated as its target and then moved
+        as a link. ValueError, before anything is read or written, unless it is a plain file with one name
+        directly in DATA_DIR/spool and source itself is no link: E4-3 writes nothing else there (D-90), and
+        through a second name (a hard link) the payload could change after validation. A value that is not
+        a Path goes on to validate(), which answers 400 on source."""
+        if not isinstance(source, Path):
+            return source
+        resolved = source.resolve()
+        if (resolved.parent != self._config.data_dir.resolve() / "spool" or source.is_symlink()
+                or not resolved.is_file() or resolved.stat().st_nlink != 1):
+            raise ValueError("source must resolve to a plain file with one name directly in DATA_DIR/spool, "
+                             "through no link (D-90)")
+        return resolved
+
+    def _write_payload(self, source: Path, file_name: FileName, stdin: bytes | None) -> tuple[Path, str]:
+        """Moves the validated upload at source to DATA_DIR/payloads/<uuid4 hex>/<file_name> with os.replace:
+        a rename, never a copy, so a spool on another drive fails loudly (D-90). When stdin is not None,
+        input.txt holds it beside the source (D-96), written first, so the upload moves only into a complete
+        folder. The folder, created new, is what E1 mounts read-only for the sandbox user: it gets
+        PAYLOAD_FOLDER_MODE and its files PAYLOAD_FILE_MODE, whatever the umask or the mode the spool file
+        had. Any failure removes the folder and re-raises. Returns the folder and payload_path, the folder
+        relative to DATA_DIR."""
         name = uuid.uuid4().hex
         root = self._config.data_dir.resolve()
         folder = (root / "payloads" / name).resolve()
@@ -533,8 +574,13 @@ class E2Service:
             raise RuntimeError(f"payload folder {folder} resolves outside DATA_DIR {root}")
         folder.mkdir(parents=True)
         try:
-            with open(folder / file_name, "xb") as out:
-                out.write(source)
+            folder.chmod(PAYLOAD_FOLDER_MODE)
+            if stdin is not None:
+                with open(folder / INPUT_FILE, "xb") as out:
+                    out.write(stdin)
+                (folder / INPUT_FILE).chmod(PAYLOAD_FILE_MODE)
+            os.replace(source, folder / file_name)
+            (folder / file_name).chmod(PAYLOAD_FILE_MODE)  # os.replace keeps the spool file's own mode
         except BaseException:
             _remove(folder)
             raise

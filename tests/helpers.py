@@ -8,6 +8,7 @@ import io
 import json
 import secrets
 import stat
+import sys
 import threading
 import time
 import zipfile
@@ -144,6 +145,25 @@ def zip_of(files: dict[str, bytes], links: tuple[str, ...] = (), compression: in
             info.external_attr = (stat.S_IFLNK | 0o777) << 16
             archive.writestr(info, "main.py")
     return buffer.getvalue()
+
+
+def spooled(data_dir: Path, data: bytes) -> Path:
+    """data in a new file directly in data_dir/spool, as E4-3 spools an upload for submit() (D-90); the
+    name is made here, never taken from the user's file name (D-76)."""
+    folder = data_dir / "spool"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / secrets.token_hex(16)
+    path.write_bytes(data)
+    return path
+
+
+def link_folder(link: Path, target: Path) -> None:
+    """A folder link that needs no privilege: a junction on Windows, a symbolic link elsewhere."""
+    if sys.platform == "win32":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        link.symlink_to(target, target_is_directory=True)
 
 
 DEFAULT_JOB_VECTOR = Vector(1000, 512)  # make_job()'s default; a call in the signature trips B008
