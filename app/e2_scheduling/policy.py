@@ -5,6 +5,7 @@ database or an engine; first_fit's predicate is Snapshot.fits on the cycle's sna
 """
 from __future__ import annotations
 
+import itertools
 from typing import Literal
 
 from app.common.types import QueueEntry, Snapshot, Vector
@@ -39,6 +40,19 @@ def select_need(q: JobQueue, snap: Snapshot, now: float, guard_s: float) -> Queu
     if now - oldest.submitted_at.timestamp() >= guard_s:
         return oldest if snap.fits(oldest.vector) else None
     return q.first_fit(lambda e: snap.fits(e.vector))
+
+
+def in_policy_order(q: JobQueue, policy: Policy, now: float, guard_s: float) -> list[QueueEntry]:
+    """Every queued job in the order the policy tries them (queue_view, plan 8.4): arrival order under fcfs;
+    under need, first the jobs that have waited guard_s or more, in arrival order (each in turn is the oldest
+    and may not be overtaken, as in select_need), then the rest in (need_class, submitted_at, job_id) order.
+    now is wall time, clock.time(), as in select_need."""
+    fifo = q.in_fifo_order()
+    if policy == "fcfs":
+        return fifo
+    waited = list(itertools.takewhile(lambda e: now - e.submitted_at.timestamp() >= guard_s, fifo))
+    first = {e.job_id for e in waited}
+    return waited + [e for e in q.in_need_order() if e.job_id not in first]
 
 
 def oversized(v: Vector, most: Vector) -> bool:
