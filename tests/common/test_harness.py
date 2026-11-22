@@ -2,6 +2,8 @@
 Each docstring names the bug the test catches."""
 from __future__ import annotations
 
+from itertools import pairwise
+
 import pytest
 
 from app.common.db import close_pool, init_pool, tx
@@ -70,7 +72,7 @@ def test_make_job_reaches_every_state_through_transition(db: TempDb):
             steps = cur.execute("SELECT from_state, to_state FROM job_state_history WHERE job_id = %s "
                                 "ORDER BY event_id", (job,)).fetchall()
             assert row == (state,) and steps[0] == (None, "queued") and steps[-1][1] == state
-            assert all(old[1] == new[0] and (new[0], new[1]) in ALLOWED for old, new in zip(steps, steps[1:]))
+            assert all(old[1] == new[0] and (new[0], new[1]) in ALLOWED for old, new in pairwise(steps))
     assert_invariants(settled=True)
 
 

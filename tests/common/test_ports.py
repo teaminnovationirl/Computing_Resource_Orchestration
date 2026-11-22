@@ -49,7 +49,7 @@ def test_every_stub_call_inside_a_transaction_is_refused(db: TempDb):
     """Catches an engine that calls another engine or pushes an event while its transaction holds
     locks (invariant 3): the stubs refuse it as the real engines will, long before slice C-1."""
     stubs = db.stubs
-    for (protocol, _), target in zip(PAIRS, (stubs.e1, stubs.e2, stubs.e3, stubs.e4)):
+    for (protocol, _), target in zip(PAIRS, (stubs.e1, stubs.e2, stubs.e3, stubs.e4), strict=True):
         for name in _methods(protocol):
             with tx("E2"):
                 with pytest.raises(RuntimeError, match="inside an open transaction"):

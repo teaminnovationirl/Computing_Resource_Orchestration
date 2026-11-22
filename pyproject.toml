@@ -1,4 +1,4 @@
-# Test and type-check settings only. Dependencies stay in requirements.txt
+# Test, lint and type-check settings only. Dependencies stay in requirements.txt
 # and requirements-dev.txt.
 
 [tool.pytest.ini_options]
@@ -7,7 +7,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 # pytest -q runs everything that needs no Docker. pytest -q -m docker runs
 # the sandbox tests, because a -m on the command line replaces this one.
-addopts = ["--strict-markers", "-m", "not docker"]
+addopts = ["--strict-markers", "-m", "not docker", "--tb=short"]
 markers = [
     "docker: needs Docker Engine on Linux with cgroup v2",
     "slow: real waits over 5 s",
@@ -18,3 +18,27 @@ markers = [
 # pyright (CLI and language server) reads the packages of the project's .venv.
 venvPath = "."
 venv = ".venv"
+
+[tool.ruff]
+# Lint only (D-107): no formatter and no style rules. The hook
+# .claude/hooks/ruff_check.py runs it on every edited .py file.
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["F", "E9", "B", "BLE", "S", "DTZ", "ASYNC"]
+# S603 and S607 flag every subprocess call; S602 still catches shell=True.
+ignore = ["S603", "S607"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S311"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI parameter defaults are markers, not shared mutable values (B008).
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Body",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Header",
+]

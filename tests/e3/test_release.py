@@ -33,9 +33,10 @@ RUNS = 100
 NOTHING_HELD = {1: 0, 2: 0, 3: 0, 4: 0}
 FULL = {1: 28800, 2: 117964, 3: 14745, 4: 14745}  # total - reserved on every S0 row
 NO_SUCH_JOB = 999_999_999  # job ids start at 1042 and every test has a fresh database
+SMALL_VECTOR = Vector(100, 64)  # finished()'s default; a call in the signature trips B008
 
 
-def finished(state: JobState = "completed", vector: Vector = Vector(100, 64)) -> int:
+def finished(state: JobState = "completed", vector: Vector = SMALL_VECTOR) -> int:
     """A job that ran and ended in state, still holding its allocation of vector, as E1 leaves it once
     the stop is confirmed: make_job("running") allocates for real, then E1 makes the terminal move."""
     job = make_job("running", vector)
