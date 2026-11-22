@@ -87,7 +87,7 @@ def test_from_env_reads_the_process_environment_by_default(monkeypatch):
 def test_config_is_frozen():
     config = Config()
     with pytest.raises(dataclasses.FrozenInstanceError):
-        setattr(config, "heartbeat_s", 5.0)  # what an assignment does, without the type error
+        setattr(config, "heartbeat_s", 5.0)  # noqa: B010 (what an assignment does, without the type error)
 
 
 @pytest.mark.parametrize(

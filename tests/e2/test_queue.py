@@ -103,7 +103,7 @@ def test_property_20_seeds_by_10000_operations(seed: int):
         else:
             limit = rnd.choice((100, 500, 2000))
             want = next((e for e in sorted(model, key=NEED) if e.vector.cpu_millicores <= limit), None)
-            assert q.first_fit(lambda e: e.vector.cpu_millicores <= limit) is want
+            assert q.first_fit(lambda e, limit=limit: e.vector.cpu_millicores <= limit) is want
         assert_same(q, model)
 
 
@@ -237,7 +237,7 @@ def test_push_refuses_a_queued_job_and_a_naive_time_and_changes_nothing():
     with pytest.raises(ValueError):
         q.push(job(1, need_class=1, at=0))
     with pytest.raises(ValueError):
-        q.push(QueueEntry(3, "01FE24BCS901", 3, datetime(2026, 11, 21, 9, 0), Vector(100, 64)))
+        q.push(QueueEntry(3, "01FE24BCS901", 3, datetime(2026, 11, 21, 9, 0), Vector(100, 64)))  # noqa: DTZ001 (the naive time is the input under test)
     assert_same(q, [a, b])
 
 
@@ -329,54 +329,60 @@ def test_two_threads_pushing_and_removing_at_once_stay_consistent():
     sys.setswitchinterval(1e-6)
     try:
         for rep in range(100):
-            q = JobQueue()
-            barrier = threading.Barrier(2)
-            done = threading.Event()
-            pushes: Counter[int] = Counter()
-            removes: Counter[int] = Counter()
-            errors: list[BaseException] = []
-
-            def pusher() -> None:
-                barrier.wait(timeout=30)
-                for n, e in entries.items():
-                    q.push(e)
-                    pushes[n] += 1
-                while not done.is_set():
-                    for n, e in entries.items():
-                        try:
-                            q.push(e)
-                            pushes[n] += 1
-                        except ValueError:                   # still queued: nothing to requeue
-                            pass
-
-            def remover(rnd: random.Random = random.Random(rep)) -> None:
-                barrier.wait(timeout=30)
-                try:
-                    for _ in range(1000):
-                        n = rnd.randint(1, 120)
-                        if q.remove(n) is not None:
-                            removes[n] += 1
-                        if rnd.random() < 0.1:
-                            q.fifo_head()
-                            q.first_fit(lambda e: e.vector.cpu_millicores > 10_000)
-                finally:
-                    done.set()
-
-            def guarded(fn: Callable[[], None]) -> Callable[[], None]:
-                def run() -> None:
-                    try:
-                        fn()
-                    except BaseException as exc:
-                        errors.append(exc)
-                return run
-
-            threads = [threading.Thread(target=guarded(pusher)), threading.Thread(target=guarded(remover))]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(30)
-            assert errors == [] and not any(thread.is_alive() for thread in threads)
-            assert all(pushes[n] - removes[n] in (0, 1) for n in entries)
-            assert_same(q, [e for n, e in entries.items() if pushes[n] - removes[n] == 1])
+            push_and_remove_at_once(entries, random.Random(rep))
     finally:
         sys.setswitchinterval(old)
+
+
+def push_and_remove_at_once(entries: dict[int, QueueEntry], rnd: random.Random) -> None:
+    """One repetition of the test above on a fresh queue. Its threads' functions close over this call's
+    names, never over a loop variable of the repetitions (B023)."""
+    q = JobQueue()
+    barrier = threading.Barrier(2)
+    done = threading.Event()
+    pushes: Counter[int] = Counter()
+    removes: Counter[int] = Counter()
+    errors: list[BaseException] = []
+
+    def pusher() -> None:
+        barrier.wait(timeout=30)
+        for n, e in entries.items():
+            q.push(e)
+            pushes[n] += 1
+        while not done.is_set():
+            for n, e in entries.items():
+                try:
+                    q.push(e)
+                    pushes[n] += 1
+                except ValueError:                           # still queued: nothing to requeue
+                    pass
+
+    def remover() -> None:
+        barrier.wait(timeout=30)
+        try:
+            for _ in range(1000):
+                n = rnd.randint(1, 120)
+                if q.remove(n) is not None:
+                    removes[n] += 1
+                if rnd.random() < 0.1:
+                    q.fifo_head()
+                    q.first_fit(lambda e: e.vector.cpu_millicores > 10_000)
+        finally:
+            done.set()
+
+    def guarded(fn: Callable[[], None]) -> Callable[[], None]:
+        def run() -> None:
+            try:
+                fn()
+            except BaseException as exc:  # noqa: BLE001 (handed to the main thread, which asserts there is none)
+                errors.append(exc)
+        return run
+
+    threads = [threading.Thread(target=guarded(pusher)), threading.Thread(target=guarded(remover))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert errors == [] and not any(thread.is_alive() for thread in threads)
+    assert all(pushes[n] - removes[n] in (0, 1) for n in entries)
+    assert_same(q, [e for n, e in entries.items() if pushes[n] - removes[n] == 1])

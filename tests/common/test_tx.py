@@ -403,7 +403,7 @@ def test_init_pool_fails_fast_and_keeps_one_pool(db: TempDb):
             pass
     started = time.monotonic()
     with pytest.raises(psycopg.OperationalError, match="password authentication failed"):
-        init_pool(make_conninfo(db.app_url, password="wrong"), min_size=1, max_size=1)
+        init_pool(make_conninfo(db.app_url, password="wrong"), min_size=1, max_size=1)  # noqa: S106 (wrong on purpose)
     assert time.monotonic() - started < 5
     init_pool(db.app_url, min_size=1, max_size=1)
     with pytest.raises(RuntimeError, match="already open"):

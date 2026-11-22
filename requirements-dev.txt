@@ -2,3 +2,4 @@
 -r requirements.txt
 pytest==9.2.0
 httpx==0.28.1                  # FastAPI TestClient
+ruff==0.17.6                   # lint only, no formatter (D-107)

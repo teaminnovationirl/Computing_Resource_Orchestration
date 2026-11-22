@@ -39,9 +39,9 @@ _SEPARATORS: Final = re.compile(r"[\\/]")
 # zipfile's own reader of the end of central directory record (zip64 included), so the bound in _zip()
 # applies to exactly the directory that ZipFile() parses next. It is private but has been in zipfile
 # since Python 2; it is looked up here, so a Python without it fails at start-up, not on a request.
-_END_RECORD: Final = cast(Callable[[BinaryIO], "list[Any] | None"], getattr(zipfile, "_EndRecData"))
-_END_ENTRIES: Final[int] = getattr(zipfile, "_ECD_ENTRIES_TOTAL")
-_END_DIRECTORY_SIZE: Final[int] = getattr(zipfile, "_ECD_SIZE")
+_END_RECORD: Final = cast(Callable[[BinaryIO], "list[Any] | None"], getattr(zipfile, "_EndRecData"))  # noqa: B009 (not in typeshed, so pyright refuses the attribute)
+_END_ENTRIES: Final[int] = getattr(zipfile, "_ECD_ENTRIES_TOTAL")  # noqa: B009 (not in typeshed)
+_END_DIRECTORY_SIZE: Final[int] = getattr(zipfile, "_ECD_SIZE")  # noqa: B009 (not in typeshed)
 
 
 @dataclass(frozen=True)

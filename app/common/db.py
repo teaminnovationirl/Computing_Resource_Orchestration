@@ -161,7 +161,7 @@ def tx(engine: Engine) -> Iterator[Tx]:
     for fn in hooks:  # COMMIT done and the connection back in the pool: no lock is held
         try:
             fn()
-        except Exception:
+        except Exception:  # noqa: BLE001 (D-47: a failing hook is logged and the next one still runs)
             log.exception("after_commit_failed", engine=engine, hook=getattr(fn, "__qualname__", repr(fn)))
 
 

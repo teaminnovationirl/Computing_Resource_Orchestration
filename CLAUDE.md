@@ -89,6 +89,7 @@ uvicorn app.main:create_app --factory --workers 1 --port 8000
 Tests pass (show the summary line), the invariant query returns no rows,
 interfaces match app/common/ports.py, docs/decisions.md is updated, and the
 slice's run command works from a clean checkout.
+pyright shows 0 errors on the changed files and ruff check . shows 0 findings.
 
 ## Addendum (overrides anything above that conflicts)
 
@@ -105,6 +106,7 @@ slice's run command works from a clean checkout.
 ## Machine limits (permanent; the development laptop hung under load on 2026-11-19)
 
 - One pytest process at a time. Never run subagents in parallel: run them one after another, and a subagent never runs tests while another test run is active.
+- The PreToolUse hook .claude/hooks/guard.py enforces the one-pytest rule: it blocks a pytest command while another pytest process runs (D-110).
 - During development run only the affected test files; run the full suite once, just before the commit. For a planted bug, run only the test file that should catch it.
 - Do not pull or build extra Docker images for verification. Linux verification happens at C-4 or when asked.
 - Before a command that creates many databases or may run longer than 5 minutes, say so first.

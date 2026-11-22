@@ -142,7 +142,10 @@ def zip_of(files: dict[str, bytes], links: tuple[str, ...] = (), compression: in
     return buffer.getvalue()
 
 
-def make_job(state: JobState = "queued", vector: Vector = Vector(1000, 512)) -> int:
+DEFAULT_JOB_VECTOR = Vector(1000, 512)  # make_job()'s default; a call in the signature trips B008
+
+
+def make_job(state: JobState = "queued", vector: Vector = DEFAULT_JOB_VECTOR) -> int:
     """A cpu_bound job of a new student in the given state; returns its job_id. E2 inserts it with
     insert_job(), the INSERT that submit() runs, which sets app.actor and app.reason for it (D-81).
     It skips submit()'s validation and payload, so a test may ask allocate() for any vector and needs

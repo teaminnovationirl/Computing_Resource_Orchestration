@@ -26,7 +26,8 @@ S0 = [(1, "cpu", None, 32000, 3200, 28800), (2, "ram", None, 131072, 13108, 1179
 ROWS = ("SELECT resource_id, kind, gpu_index, total, reserved, total - reserved - allocated "
         "FROM resources ORDER BY resource_id")
 NEW_ALLOCATION = "INSERT INTO allocations (job_id) VALUES (%s) RETURNING allocation_id"
-INVARIANTS = (ROOT / "db" / "invariants.sql").read_text(encoding="utf-8").split("-- name: leaks")[0]
+# bytes, as tests/helpers.py's invariant_queries() gives them: psycopg's typed execute() takes no runtime str
+INVARIANTS = (ROOT / "db" / "invariants.sql").read_text(encoding="utf-8").split("-- name: leaks")[0].encode()
 WAITING_ON = "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE %s = ANY (pg_blocking_pids(pid)))"
 MEMINFO = "MemTotal:       16333128 kB\nMemFree:         1048576 kB\nMemAvailable:    8388608 kB\n"
 HOST_CPU_RAM = [("cpu", None, 8000, 800), ("ram", None, 15950, 1595)]  # 8 CPUs; 16,333,128 kB = 15,950 MiB
@@ -146,10 +147,12 @@ def _committed_job(owner: psycopg.Connection) -> int:
     """A queued job, committed, inserted the way E2 submits one."""
     with owner.transaction():
         owner.execute("SELECT set_config('app.actor', 'E2', true), set_config('app.reason', 'submitted', true)")
-        return owner.execute(
+        row = owner.execute(
             "INSERT INTO jobs (user_id, type_code, cpu_millicores, ram_mib, vram_mib, time_limit_s, need_class, "
             "payload_path) VALUES ('01FE24BCS901', 'cpu_bound', 1000, 512, 0, 5, 3, 'payloads/test') "
-            "RETURNING job_id").fetchone()[0]
+            "RETURNING job_id").fetchone()
+        assert row is not None
+        return row[0]
 
 
 def _remove_job(owner: psycopg.Connection, job: int) -> None:
@@ -267,7 +270,7 @@ def test_cli_reports_a_bad_setting_in_one_line(capsys):
 
 def test_cli_reports_a_refused_connection_in_one_line(urls, capsys):
     """Catches a psycopg traceback when the database refuses the connection (here a wrong password)."""
-    refused = make_conninfo(urls.app, password="wrong")
+    refused = make_conninfo(urls.app, password="wrong")  # noqa: S106 (wrong on purpose)
     assert capacity.main(["--profile", "s0"], env={"DATABASE_URL": refused}) == 1
     err = capsys.readouterr().err
     assert "database orch_test" in err and err.count("\n") == 1, err
