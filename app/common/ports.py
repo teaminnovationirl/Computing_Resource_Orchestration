@@ -7,6 +7,7 @@ transaction, so engines import it from app.e4_monitoring.state.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path  # at run time: typing.get_type_hints() resolves the port's annotations (test_ports)
 from typing import Any, Literal, Protocol
 
 from app.common.types import (AlreadyReleased, Committed, Limits, QueueEntry, Refused, Released, Snapshot,
@@ -20,7 +21,11 @@ class E3Port(Protocol):
 
 
 class E2Port(Protocol):
-    def submit(self, user: User, req: SubmitRequest, source: bytes) -> SubmitResult: ...  # message 2
+    def submit(self, user: User, req: SubmitRequest, source: Path) -> SubmitResult:  # message 2
+        """source is the spooled upload (D-90): a plain file directly in DATA_DIR/spool that the caller has
+        closed (on Windows os.replace fails on an open file). Moved into the job's payload folder on success;
+        left where it is after a 400, a ValueError or any other failure, for the caller to delete."""
+        ...
     def capacity_changed(self) -> None: ...                                # message 8
     def requeue(self, job_id: int) -> bool: ...                            # message 11; False = retries used up
     def cancel_queued(self, job_id: int, by: str) -> bool: ...             # message 11; proposal name

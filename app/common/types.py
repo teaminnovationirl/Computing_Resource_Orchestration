@@ -68,9 +68,11 @@ class User:
 
 @dataclass(frozen=True)
 class SubmitRequest:
-    """An authenticated job request (message 2) without its source, which travels as bytes.
-    source_name is the uploaded file's name; E2 uses only its extension and never stores it or puts it
-    in a path, and "" means the name was not given (D-76)."""
+    """An authenticated job request (message 2) without its source, which travels as the path of the
+    spooled upload (D-90). source_name is the uploaded file's name; E2 uses only its extension and never
+    stores it or puts it in a path, and "" means the name was not given (D-76). stdin is a practice run's
+    input (code_run only, at most 1 MiB, D-96), None when absent; E2 stores it as input.txt beside the
+    source. Neither appears in the repr, so neither reaches a log line."""
     workload_type: str
     cpu_millicores: int
     ram_mib: int
@@ -79,6 +81,7 @@ class SubmitRequest:
     problem_id: int | None = None
     lab_session_id: int | None = None
     source_name: str = field(default="", kw_only=True, repr=False)  # repr=False: never in a log (D-76)
+    stdin: bytes | None = field(default=None, kw_only=True, repr=False)  # never in a log (D-96)
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,8 @@
 """Fixtures of the E2 tests (plan 8.5)."""
 from __future__ import annotations
 
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 import psycopg
@@ -10,7 +12,7 @@ import app.e3_allocation as e3
 from app.common.ports import Engines, install
 from app.config import Config
 from app.e2_scheduling import E2Service
-from tests.helpers import ROOT, OffsetClock, TempDb
+from tests.helpers import ROOT, OffsetClock, TempDb, spooled
 
 
 @pytest.fixture
@@ -21,6 +23,13 @@ def seeded(db: TempDb) -> TempDb:
     with psycopg.connect(db.owner_url, autocommit=True) as conn:
         conn.execute((ROOT / "db" / "seed.sql").read_bytes())
     return db
+
+
+@pytest.fixture
+def spool(tmp_path: Path) -> Callable[[bytes], Path]:
+    """spool(data): data in a new spool file under tmp_path, the DATA_DIR of the E2 fixtures below, as E4-3
+    hands an upload to submit() (D-90)."""
+    return partial(spooled, tmp_path)
 
 
 @pytest.fixture

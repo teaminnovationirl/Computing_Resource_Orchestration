@@ -13,7 +13,8 @@ INSERT INTO workload_types (type_code, default_need_class, max_time_limit_s) VAL
     ('mem_bound', 3,  600),
     ('gpu_bound', 3, 1800),
     ('mixed',     3,  600),
-    ('python_ml', 3, 3600);  -- D-85: 14,400 s is a proposal the CHECK does not allow yet
+    ('python_ml', 3, 3600),  -- D-85: 14,400 s is a proposal the CHECK does not allow yet
+    ('code_run',  3,   10);  -- D-96: practice runs, one run with the user's stdin (the 10 s limit is a proposal)
 
 -- Demo users (bcrypt, cost 12)
 INSERT INTO users (user_id, role, password_hash) VALUES

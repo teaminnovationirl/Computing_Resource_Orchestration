@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import typing
+from pathlib import Path
 
 import pytest
 
@@ -19,7 +20,7 @@ PAIRS = [(E1Port, StubE1), (E2Port, StubE2), (E3Port, StubE3), (E4Port, StubE4)]
 LIMITS = Limits(cpu_millicores=1000, ram_mib=512, gpu_index=None, time_limit_s=5)
 CALLS: dict[str, tuple[object, ...]] = {  # one valid argument list for every port method
     "dispatch": (1042, 5, LIMITS, "payloads/1042"), "stop": (1042,), "cancel": (1042, "01FE24BCS901"),
-    "submit": (User("01FE24BCS901", "student"), SubmitRequest("cpu_bound", 1000, 512, 0, 5), b"int main(){}"),
+    "submit": (User("01FE24BCS901", "student"), SubmitRequest("cpu_bound", 1000, 512, 0, 5), Path("spool/prog")),
     "capacity_changed": (), "requeue": (1042,), "cancel_queued": (1042, "01FE24BCS901"),
     "pause_admission": ("host health",), "resume_admission": (), "set_policy": ("need",), "queue_view": (),
     "snapshot": (), "allocate": (1042, Vector(1000, 512)), "release": (1042,),

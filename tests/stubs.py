@@ -7,6 +7,7 @@ from __future__ import annotations
 import itertools
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from app.common.db import assert_outside_tx
@@ -63,7 +64,7 @@ class StubE2(_Recorder):
         self.cancel_result = True
         self.queue: list[QueueEntry] = []
 
-    def submit(self, user: User, req: SubmitRequest, source: bytes) -> SubmitResult:
+    def submit(self, user: User, req: SubmitRequest, source: Path) -> SubmitResult:
         self._record("submit", user, req, source)
         with self._lock:
             if not self.submit_results:
