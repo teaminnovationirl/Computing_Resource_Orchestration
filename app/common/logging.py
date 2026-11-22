@@ -40,6 +40,10 @@ class _JsonLines(logging.Formatter):
 class EventLog:
     """log.<level>(event, **fields): one record per call, the form plan 7.1, 8.3 and 10.6 use."""
 
+    def debug(self, event: str, **fields: object) -> None:
+        """Dropped at the INFO level that configure() sets: for lines that would bury the console (D-119)."""
+        LOGGER.debug(event, extra={"fields": fields})
+
     def info(self, event: str, **fields: object) -> None:
         LOGGER.info(event, extra={"fields": fields})
 
