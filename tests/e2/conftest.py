@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
 
 import psycopg
 import pytest
 
 import app.e3_allocation as e3
-from app.common.ports import E2Port, Engines, install
+from app.common.ports import Engines, install
 from app.config import Config
 from app.e2_scheduling import E2Service
 from tests.helpers import ROOT, OffsetClock, TempDb
@@ -51,6 +50,5 @@ def e2_real(seeded: TempDb, tmp_path: Path, db_clock: OffsetClock) -> E2Service:
     """E2 on db_clock with the real E3 behind the ports and this E2Service as e2, so a release() wakes it;
     E1 and E4 stay stubs. The db fixture uninstalls every engine afterwards."""
     service = E2Service(Config(data_dir=tmp_path), clock=db_clock)
-    # cast: E2-4 adds the rest of E2Port (requeue, cancel_queued, pause and resume, set_policy, queue_view)
-    install(Engines(e1=seeded.stubs.e1, e2=cast(E2Port, service), e3=e3, e4=seeded.stubs.e4))
+    install(Engines(e1=seeded.stubs.e1, e2=service, e3=e3, e4=seeded.stubs.e4))  # pyright checks it is an E2Port
     return service

@@ -16,6 +16,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Final, LiteralString, TypeVar
 
 import psycopg
@@ -244,11 +245,11 @@ def lockable(probe: psycopg.Connection[Any], query: LiteralString, key: int) -> 
     return True
 
 
-def fail_at_end_of_body(monkeypatch: pytest.MonkeyPatch, *failures: Exception) -> None:
-    """Make the transactions of app.e3_allocation.service raise each failure in turn once the body has
-    run, that is after every write and every after_commit registration, inside the real tx(), which
-    then rolls back. A fault at the transaction boundary: the code under test runs unchanged."""
-    real = service.tx
+def fail_at_end_of_body(monkeypatch: pytest.MonkeyPatch, *failures: Exception, module: ModuleType = service) -> None:
+    """Make the transactions of module (app.e3_allocation.service unless given) raise each failure in turn
+    once the body has run, that is after every write and every after_commit registration, inside the real
+    tx(), which then rolls back. A fault at the transaction boundary: the code under test runs unchanged."""
+    real = module.tx
     pending = list(failures)
 
     @contextmanager
@@ -258,7 +259,26 @@ def fail_at_end_of_body(monkeypatch: pytest.MonkeyPatch, *failures: Exception) -
             if pending:
                 raise pending.pop(0)
 
-    monkeypatch.setattr(service, "tx", failing_tx)
+    monkeypatch.setattr(module, "tx", failing_tx)
+
+
+def lose_commit_ack(monkeypatch: pytest.MonkeyPatch, module: ModuleType, *failures: Exception) -> None:
+    """Make the next transactions of module commit and then raise each failure in turn instead of running their
+    hooks: a lost COMMIT acknowledgement (D-105), the work committed and every after_commit hook skipped."""
+    real = module.tx
+    pending = list(failures)
+
+    @contextmanager
+    def ack_lost(engine: Engine) -> Iterator[Tx]:
+        failure = pending.pop(0) if pending else None
+        with real(engine) as t:
+            yield t
+            if failure is not None:
+                t.hooks.clear()
+        if failure is not None:
+            raise failure
+
+    monkeypatch.setattr(module, "tx", ack_lost)
 
 
 def logged(path: Path, event: str) -> list[dict[str, Any]]:

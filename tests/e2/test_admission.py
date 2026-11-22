@@ -9,14 +9,13 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
-from typing import cast
 
 import psycopg
 import pytest
 
 import app.e3_allocation as e3
 from app.common.db import tx
-from app.common.ports import E2Port, E3Port, Engines, install
+from app.common.ports import E3Port, Engines, install
 from app.common.types import AlreadyReleased, Committed, Refused, Released, Snapshot, SubmitRequest, User, Vector
 from app.config import Config
 from app.e2_scheduling.loop import AdmissionLoop
@@ -38,7 +37,7 @@ def release_job(job_id: int) -> None:
 
 
 def use_e3(e2: E2Service, seeded: TempDb, port: E3Port) -> None:
-    install(Engines(e1=seeded.stubs.e1, e2=cast(E2Port, e2), e3=port, e4=seeded.stubs.e4))
+    install(Engines(e1=seeded.stubs.e1, e2=e2, e3=port, e4=seeded.stubs.e4))
 
 
 class Counted:
@@ -197,20 +196,24 @@ def test_ten_releases_at_once_run_cycles_one_at_a_time_on_the_loop_thread(
 
 
 def race_once(pool: ThreadPoolExecutor, e2: E2Service, watch: psycopg.Connection[tuple[object, ...]]) -> None:
-    """One run: a job waits; then a cycle, a second submit and a release start together behind a Barrier."""
+    """One run: a job waits; then a cycle, a second submit, a release and a cancel of the waiting job start
+    together behind a Barrier (D-104, D-118). The cancel either wins (cancelled, nothing ever allocated) or
+    finds the job allocated by the cycle and answers False; it never lands between admitted and allocate(),
+    where it would raise IllegalTransition (D-122) and fail this run."""
     holder = make_job("running", SMALL)
-    e2.submit(STUDENT, REQUEST, b"print(1)\n")
-    barrier = threading.Barrier(3)
+    waiting = e2.submit(STUDENT, REQUEST, b"print(1)\n").job_id
+    barrier = threading.Barrier(4)
 
     def at_once(call: Callable[[], object]) -> object:
         barrier.wait(10)
         return call()
 
     calls: list[Callable[[], object]] = [e2.run_cycle, partial(e2.submit, STUDENT, REQUEST, b"print(2)\n"),
-                                         partial(release_job, holder)]
-    for future in [pool.submit(at_once, call) for call in calls]:
-        future.result(timeout=30)
+                                         partial(release_job, holder), partial(e2.cancel_queued, waiting, "ADM001")]
+    results = [future.result(timeout=30) for future in [pool.submit(at_once, call) for call in calls]]
     e2.run_cycle()  # admit what the race left queued
+    count = watch.execute("SELECT count(*) FROM allocations WHERE job_id = %s", (waiting,)).fetchone()
+    assert (job_state(waiting), count) == (("cancelled", (0,)) if results[3] else ("allocated", (1,)))
     queued_rows = {row[0] for row in watch.execute("SELECT job_id FROM jobs WHERE state = 'queued'")}
     assert {e.job_id for e in e2.queue.in_fifo_order()} == queued_rows
     assert watch.execute("SELECT job_id FROM job_state_history WHERE to_state = 'admitted' "
@@ -218,8 +221,8 @@ def race_once(pool: ThreadPoolExecutor, e2: E2Service, watch: psycopg.Connection
     assert watch.execute("SELECT job_id FROM allocations GROUP BY job_id HAVING count(*) > 1").fetchall() == []
 
 
-def test_a_cycle_a_submit_and_a_release_at_once_100_times(e2_real: E2Service, seeded: TempDb):
-    with psycopg.connect(seeded.owner_url, autocommit=True) as watch, ThreadPoolExecutor(3) as pool:
+def test_a_cycle_a_submit_a_release_and_a_cancel_at_once_100_times(e2_real: E2Service, seeded: TempDb):
+    with psycopg.connect(seeded.owner_url, autocommit=True) as watch, ThreadPoolExecutor(4) as pool:
         for _ in range(100):
             race_once(pool, e2_real, watch)
     assert_invariants()
