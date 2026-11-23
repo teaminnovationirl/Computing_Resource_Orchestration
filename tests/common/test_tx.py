@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, LiteralString
 
@@ -215,6 +216,23 @@ def test_hooks_registered_in_a_savepoint_follow_its_outcome(db: TempDb):
             raise psycopg.Rollback
         cur.after_commit(lambda: ran.append("after"))
     assert ran == ["before", "released", "after"]
+
+
+@pytest.mark.parametrize("connection", ["idle", "in_use", "closed"])
+def test_a_finished_tx_refuses_a_savepoint(db: TempDb, connection: str):
+    """Catches a savepoint on a Tx kept past its tx() (D-141): its connection is back in the pool, so
+    savepoint() began a transaction on it or, while another tx() used it, a savepoint inside that one, with
+    no error. The case in_use also catches a guard that reads the connection's status (the bug of Q1-06), and
+    the case closed a guard that touches the connection before it refuses."""
+    _reopen(db, 1)  # one connection: the next tx() gets the finished one's
+    with tx("E2") as t:
+        pass
+    if connection == "closed":
+        close_pool()
+    with tx("E4") if connection == "in_use" else nullcontext():
+        with pytest.raises(RuntimeError, match=r"savepoint\(\) on a finished transaction"):
+            with t.savepoint():
+                pass
 
 
 def test_transactions_on_two_threads_are_not_nested(db: TempDb):

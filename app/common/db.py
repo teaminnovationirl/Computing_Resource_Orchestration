@@ -80,6 +80,8 @@ class Tx:
         of tx() (D-48, D-67). When it rolls back (an exception, or psycopg.Rollback), the
         after_commit hooks registered inside it are dropped too, including those of inner
         savepoints that were already released, so nothing is pushed for work that was undone."""
+        if self.finished:  # its connection is back in the pool and may belong to another thread (D-141)
+            raise RuntimeError("savepoint() on a finished transaction")
         mark = len(self.hooks)
         released = False
         try:

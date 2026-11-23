@@ -68,10 +68,14 @@ The code review of the fixes (one reviewer, verdict "with fixes") led to these c
 - A spy test now makes the D-132 fix fail on the laptop's 3.13.5 too:
   test_the_end_record_reader_finds_the_archive_at_its_file_offsets, red on a planted plain copy.
 
-Open proposals from the review, not applied:
+Proposals from the review that were left to the owner:
 
-- Tx.savepoint() on a finished Tx still opens a savepoint on the pooled connection, inside whatever
-  transaction holds it now. No caller does this. A `finished` guard there would close the path at its
-  root; it changes app/common, so it needs the owner's OK.
-- init_pool() raises psycopg's ProgrammingError for a DATABASE_URL that does not parse, and the message
-  can quote the password. This is a gotcha for C-1, whose main.py calls it.
+- Fixed after the audit commit, by the owner's decision of 2026-11-23 (D-141): Tx.savepoint() on a finished
+  Tx opened a transaction on the pooled connection or, while another tx() used it, a savepoint inside that
+  one, with no error. No caller did this. It was deferred at first, because it changes app/common. It now
+  raises RuntimeError before it touches the connection. Test: tests/common/test_tx.py,
+  test_a_finished_tx_refuses_a_savepoint (3 cases), red before the change. Two planted guards, one that
+  reads the connection's status and one that runs after the connection is touched, were caught, then
+  removed. The D-135 test still catches transition() without its own check (planted, then removed).
+- Not applied: init_pool() raises psycopg's ProgrammingError for a DATABASE_URL that does not parse, and the
+  message can quote the password. This is a gotcha for C-1, whose main.py calls it.
