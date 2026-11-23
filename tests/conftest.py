@@ -25,7 +25,7 @@ from psycopg.conninfo import make_conninfo
 
 from app.common import ports
 from app.common.db import close_pool, init_pool
-from app.common.logging import LOGGER, configure
+from app.common.logging import LIBRARY, LOGGER, configure
 from app.config import Config
 from tests.helpers import TempDb
 from tests.stubs import install_stubs
@@ -197,8 +197,9 @@ def json_log(tmp_path: Path) -> Iterator[Path]:
     """Logging as main.py configures it, into tmp_path/logs/server.log; undone afterwards."""
     configure(tmp_path)
     yield tmp_path / "logs" / "server.log"
-    for handler in LOGGER.handlers[:]:
-        LOGGER.removeHandler(handler)
-        handler.close()
+    for logger in (LOGGER, LIBRARY):
+        for handler in logger.handlers[:]:
+            logger.removeHandler(handler)
+            handler.close()
+        logger.propagate = True
     LOGGER.setLevel(logging.NOTSET)
-    LOGGER.propagate = True

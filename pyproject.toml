@@ -18,6 +18,9 @@ markers = [
 # pyright (CLI and language server) reads the packages of the project's .venv.
 venvPath = "."
 venv = ".venv"
+# Plain `pyright` checks every Python file of the repository but the hooks (D-139): the CLI always skips
+# folders whose name starts with a dot, so .claude/hooks has a project of its own (pyright -p .claude/hooks).
+include = ["app", "scripts", "tests"]
 
 [tool.ruff]
 # Lint only (D-107): no formatter and no style rules. The hook

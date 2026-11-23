@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any, Final
 
 LOGGER: Final = logging.getLogger("orch")
+# psycopg and psycopg_pool report what fails beneath the callers (a refused connection, a broken one
+# discarded) on this logger, at the WARNING level psycopg sets; configure() sends it to the same places (D-136).
+LIBRARY: Final = logging.getLogger("psycopg")
 
 
 class _JsonLines(logging.Formatter):
@@ -62,16 +65,19 @@ log: Final = EventLog()
 
 
 def configure(data_dir: Path) -> None:
-    """Send the records to stdout and data_dir/logs/server.log as JSON lines; main.py calls this
-    once at startup. Calling it again replaces the handlers."""
+    """Send the records of LOGGER and LIBRARY to stdout and data_dir/logs/server.log as JSON lines;
+    main.py calls this once at startup. Calling it again replaces the handlers."""
     log_dir = data_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    for old in LOGGER.handlers[:]:
-        LOGGER.removeHandler(old)
-        old.close()
+    for logger in (LOGGER, LIBRARY):
+        for old in logger.handlers[:]:
+            logger.removeHandler(old)
+            old.close()
     formatter = _JsonLines()
     for handler in (logging.StreamHandler(sys.stdout), logging.FileHandler(log_dir / "server.log", encoding="utf-8")):
         handler.setFormatter(formatter)
         LOGGER.addHandler(handler)
+        LIBRARY.addHandler(handler)
     LOGGER.setLevel(logging.INFO)
     LOGGER.propagate = False
+    LIBRARY.propagate = False

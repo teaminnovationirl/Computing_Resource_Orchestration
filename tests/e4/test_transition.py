@@ -291,6 +291,23 @@ def test_transition_refuses_to_run_outside_the_callers_transaction(db: TempDb):
     assert state_of(job) == "queued" and history(job) == before
 
 
+def test_transition_refuses_a_finished_tx_whose_connection_serves_another(db: TempDb):
+    """Catches the guard reading the pooled connection instead of the caller's Tx (Q1-06): once tx() has
+    ended its connection goes back to the pool, and while another tx() holds it the status reads open, so
+    a Tx kept past its with block (or used in a hook) moved the job inside that other transaction, as its
+    role, and emptied its app.actor and app.reason (D-135)."""
+    job = make_job("queued")
+    before = history(job)
+    close_pool()
+    init_pool(db.app_url, min_size=1, max_size=1)  # one connection: the next tx() gets the finished one's
+    with tx("E2") as finished:
+        pass
+    with tx("E4"):
+        with pytest.raises(RuntimeError, match="open transaction"):
+            transition(finished, job, "admitted", "E2", "a finished Tx")
+    assert state_of(job) == "queued" and history(job) == before
+
+
 def test_a_caller_can_move_each_row_of_its_own_query(db: TempDb):
     """Catches transition() running its statements on the caller's cursor: a sweep that iterates
     its own SELECT and moves each job (E4's liveness sweep, startup reconciliation) would read the

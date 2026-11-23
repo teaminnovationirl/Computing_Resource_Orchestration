@@ -60,7 +60,9 @@ def transition(t: Tx, job_id: int, to_state: JobState, actor: Engine, reason: st
     rollback. extra adds fields to it but never replaces type, job_id, user_id, state, reason or at
     (D-62)."""
     conn = t.cur.connection
-    if conn.info.transaction_status != TransactionStatus.INTRANS:
+    # t.finished first: a finished Tx's connection may be back in the pool and inside another thread's
+    # transaction, where its status reads open (D-135).
+    if t.finished or conn.info.transaction_status != TransactionStatus.INTRANS:
         raise RuntimeError(f"transition(): job {job_id} needs the caller's open transaction")
     with conn.cursor() as cur:  # its own cursor: a caller iterating its own result loses nothing
         row = _move(t, Tx(cur), job_id, to_state, actor, reason, expected)

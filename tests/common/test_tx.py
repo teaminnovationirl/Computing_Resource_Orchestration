@@ -122,6 +122,27 @@ def test_a_rollback_inside_the_block_skips_the_hooks(db: TempDb):
     assert ran == []
 
 
+@pytest.mark.parametrize(("end", "name", "kept"), [
+    ("ROLLBACK", "hand_rollback", 0), ("COMMIT", "hand_commit", 1), ("connection.rollback()", "hand_rollback_call", 0)])
+def test_an_end_sent_by_hand_then_a_read_still_skips_the_hooks(db: TempDb, end: LiteralString, name: str, kept: int):
+    """Catches the transaction status as the only check (Q1-02): any statement after a COMMIT or ROLLBACK
+    the body sent makes psycopg begin a new transaction, as orch_app because SET LOCAL ROLE ended with the
+    first, so the status reads open again and the hooks (a dispatch among them) would run for work that
+    was rolled back. A COMMIT sent by hand keeps its work; tx() still refuses (D-48, D-134)."""
+    ran: list[str] = []
+    with pytest.raises(RuntimeError, match="ended inside the block"):
+        with tx("E2") as cur:
+            cur.execute(NEW_TYPE, (name,))
+            cur.after_commit(lambda: ran.append("hook"))
+            if end == "connection.rollback()":
+                cur.cur.connection.rollback()  # the psycopg2 way to recover from an error
+            else:
+                cur.execute(end)
+            cur.execute(COUNT_TYPE, (name,)).fetchone()
+    assert _committed(db.owner_url, name) == kept
+    assert ran == []
+
+
 def test_a_failing_hook_is_logged_and_the_commit_stands(db: TempDb, json_log: Path):
     """Catches a hook error that undoes or hides the commit, skips the later hooks, or reaches the
     caller, who would then redo work that is already committed."""
@@ -215,7 +236,7 @@ def test_transactions_on_two_threads_are_not_nested(db: TempDb):
 
 
 @pytest.mark.parametrize("engine, own, other", [
-    ("E1", "DELETE FROM attempts WHERE false",
+    ("E1", "UPDATE attempts SET verdict = verdict WHERE false",  # no DELETE on attempts for E1 (D-138)
      "INSERT INTO resources (kind, gpu_index, total, reserved) VALUES ('gpu', 7, 1000, 100)"),
     ("E2", "DELETE FROM jobs WHERE false",
      "INSERT INTO users (user_id, role, password_hash) VALUES ('intruder', 'student', '$2b$12$x')"),

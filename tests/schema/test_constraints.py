@@ -115,6 +115,16 @@ def test_one_open_attempt_per_job(owner_tx):
     owner_tx.run("INSERT INTO attempts (job_id, attempt_no) VALUES (%s, 2)", (job,))
 
 
+def test_a_job_holds_at_most_two_retries(owner_tx):
+    """Catches the database's guard of at most 2 retries (FR-14, invariant 8) loosened or dropped: E2
+    refuses a third requeue in its own code, so no other test ever writes 3 (Q1-17)."""
+    job = owner_tx.new_job()
+    owner_tx.run("UPDATE jobs SET retry_count = 2 WHERE job_id = %s", (job,))
+    for retries in (3, -1):
+        with owner_tx.refused("23514", "jobs_retry_count_check"):
+            owner_tx.run("UPDATE jobs SET retry_count = %s WHERE job_id = %s", (retries, job))
+
+
 def test_audit_row_cannot_name_another_job(owner_tx):
     job_a, job_b = owner_tx.new_job(), owner_tx.new_job()
     allocation = owner_tx.one(NEW_ALLOCATION, (job_a,))[0]
@@ -151,7 +161,9 @@ def test_last_unit_race_commits_exactly_once(urls):
     """Two transactions on separate connections race for the last free unit, 100 times:
     each time exactly one commits and the other gets 23514 from resources_allocated_ck."""
     with psycopg.connect(urls.owner, autocommit=True) as admin:
-        rid = admin.execute(NEW_GPU + " RETURNING resource_id", (99, 10, 1)).fetchone()[0]  # limit 9
+        row = admin.execute(NEW_GPU + " RETURNING resource_id", (99, 10, 1)).fetchone()  # limit 9
+        assert row is not None
+        rid = row[0]
         try:
             with (psycopg.connect(urls.app, autocommit=True) as first,
                   psycopg.connect(urls.app, autocommit=True) as second,

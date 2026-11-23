@@ -243,7 +243,9 @@ def wait_until_waiting(db: TempDb, count: int, futures: Sequence[Future[Any]]) -
 
 def race(db: TempDb, pool: ThreadPoolExecutor, calls: Sequence[Callable[[], T]]) -> list[T | BaseException]:
     """Every call at once, released by one Barrier while the gate holds the CPU row; the gate opens
-    once every racer waits on a lock. Each outcome is the call's result or the exception it raised."""
+    once every racer waits on a lock. A racer that ends before then never waited, which fails the test
+    whatever it returned: a lock skipped or not taken can still give an accepted outcome (Q1-15). Each
+    outcome is the call's result or the exception it raised."""
     barrier = threading.Barrier(len(calls))
 
     def run(call: Callable[[], T]) -> T:
@@ -253,6 +255,8 @@ def race(db: TempDb, pool: ThreadPoolExecutor, calls: Sequence[Callable[[], T]])
     with gate(db):
         futures = [pool.submit(run, call) for call in calls]
         wait_until_waiting(db, len(calls), futures)
+        early = [future.exception() or future.result() for future in futures if future.done()]
+        assert not early, f"a racer ended before the gate opened, without waiting on a lock: {early}"
     return [future.exception(timeout=30) or future.result() for future in futures]
 
 

@@ -19,6 +19,9 @@ CHOICES: dict[str, tuple[str, ...]] = {
     "gpu_mode": ("none", "simulated", "nvidia"),
     "capacity_profile": ("s0", "host"),
 }
+# At most 2 retries (FR-14, invariant 8): jobs.retry_count holds 0 to 2, so a larger MAX_RETRIES would
+# make every third requeue fail on the CHECK (D-131).
+RETRIES_MAX = 2
 
 
 @dataclass(frozen=True)
@@ -67,9 +70,10 @@ class Config:
             if allowed is not None and value not in allowed:
                 raise ValueError(f"{name} must be one of {', '.join(allowed)}, got {value!r}")
             if f.type in (int, float):
-                zero_ok = f.name == "max_retries"
-                if not math.isfinite(value) or value < 0 or (value == 0 and not zero_ok):
-                    rule = "0 or more" if zero_ok else "more than 0"
+                retries = f.name == "max_retries"
+                if (not math.isfinite(value) or value < 0 or (value == 0 and not retries)
+                        or (retries and value > RETRIES_MAX)):
+                    rule = f"0 to {RETRIES_MAX}" if retries else "more than 0"
                     raise ValueError(f"{name} must be {rule}, got {value!r}")
 
     @classmethod

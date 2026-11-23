@@ -292,6 +292,16 @@ def test_check_database_passes_without_connecting():
     assert capacity.main(["--check-database", "orch2"], env={"DATABASE_URL": nowhere}) == 0
 
 
+@pytest.mark.parametrize("url", ["postgresql://orch_app:s3cret@localhost:5432/orch?connect_timout=5",
+                                 "postgresql://orch_app:s3cret@[::1:5432/orch"], ids=["bad parameter", "bad host"])
+def test_a_malformed_database_url_is_a_bad_setting_and_its_value_is_not_printed(url, capsys):
+    """Catches psycopg's ProgrammingError escaping as a traceback with exit 1 (Q1-08): a DATABASE_URL that
+    does not parse is a bad setting, exit 2, and its value, the password among it, is never printed (D-137)."""
+    assert capacity.main(["--check-database", "orch"], env={"DATABASE_URL": url}) == 2
+    err = capsys.readouterr().err
+    assert "DATABASE_URL" in err and "s3cret" not in err and err.count("\n") == 1, err
+
+
 RESET_SCRIPT = (["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", r"scripts\reset_db.ps1"]
                 if sys.platform == "win32" else ["bash", "scripts/reset_db.sh"])
 

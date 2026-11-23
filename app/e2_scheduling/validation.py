@@ -52,6 +52,28 @@ _SEPARATORS: Final = re.compile(r"[\\/]")
 _END_RECORD: Final = cast(Callable[[BinaryIO], "list[Any] | None"], getattr(zipfile, "_EndRecData"))  # noqa: B009 (not in typeshed, so pyright refuses the attribute)
 _END_ENTRIES: Final[int] = getattr(zipfile, "_ECD_ENTRIES_TOTAL")  # noqa: B009 (not in typeshed)
 _END_DIRECTORY_SIZE: Final[int] = getattr(zipfile, "_ECD_SIZE")  # noqa: B009 (not in typeshed)
+_END_LOCATION: Final[int] = getattr(zipfile, "_ECD_LOCATION")  # noqa: B009 (not in typeshed)
+_END_SIGNATURE: Final[int] = getattr(zipfile, "_ECD_SIGNATURE")  # noqa: B009 (not in typeshed)
+_CENTRAL_HEADER: Final = b"PK\x01\x02"  # the signature that starts every central directory record
+_ZIP64_END: Final = b"PK\x06\x06"  # the signature of the zip64 end record
+_ZIP64_END_BYTES: Final = 56 + 20  # the zip64 end record and its locator
+
+
+class _EndCopy(io.BytesIO):
+    """The last bytes of an archive, seen at their offsets in the file (D-132). Since the CVE-2025-8291 fix
+    (CPython 3.12.12 and 3.13.9) zipfile's end record reader seeks to the absolute offset a zip64 locator
+    gives; older readers seek from the end only, which this copy keeps as it was. An offset before the
+    copy is a negative seek, so ValueError, and the archive is refused."""
+
+    def __init__(self, data: bytes, start: int) -> None:
+        super().__init__(data)
+        self._start = start
+
+    def seek(self, pos: int, whence: int = io.SEEK_SET, /) -> int:
+        return super().seek(pos - self._start if whence == io.SEEK_SET else pos, whence) + self._start
+
+    def tell(self) -> int:
+        return super().tell() + self._start
 
 
 @dataclass(frozen=True)
@@ -218,26 +240,43 @@ def _zip(path: Path, config: Config) -> None:
     budget = cap * ZIP_DIRECTORY_BYTES_PER_ENTRY
     try:
         with open(path, "rb") as file:  # an OSError here is the disk's, so it reaches the caller as one
-            file.seek(max(os.fstat(file.fileno()).st_size - _END_TAIL, 0))
+            start = max(os.fstat(file.fileno()).st_size - _END_TAIL, 0)
+            file.seek(start)
             tail = file.read()
-        # Parsed from bytes: zipfile's reader seeks back from the end with no guard, so on a real file shorter
-        # than the zip64 record a locator promises it raises OSError, where on bytes it stops at 0 and the
-        # archive is refused below as it was before D-90 (review of E2-5).
-        end = _END_RECORD(io.BytesIO(tail))
-        if end is None:
-            raise zipfile.BadZipFile("no end of central directory record")
-        # ZipFile() builds one object per record inside the directory size this record declares, so
-        # both are bounded first: a 1 GiB upload of tiny records would otherwise cost gigabytes.
-        if end[_END_ENTRIES] > cap:
+            # Parsed from bytes: zipfile's reader seeks back from the end with no guard, so on a real file
+            # shorter than the zip64 record a locator promises it raises OSError, where on bytes it stops at 0
+            # and the archive is refused below as it was before D-90 (review of E2-5). The copy keeps the
+            # file's offsets for the readers that seek to them (D-132).
+            end = _END_RECORD(_EndCopy(tail, start))
+            if end is None:
+                raise zipfile.BadZipFile("no end of central directory record")
+            # ZipFile() builds one object per record inside the directory size this record declares and
+            # ignores the count it declares, so the size is bounded and the records are counted first: a
+            # 1 GiB upload of tiny records would otherwise cost gigabytes (D-133). It reads the size bytes that
+            # end at the reported location, except that for a zip64 archive a zipfile from before the
+            # CVE-2025-8291 fix reports the classic end record, 76 bytes past the zip64 one: the signature
+            # at that location tells which. Every record starts with the central header signature, which
+            # cannot overlap itself, so its count over those bytes is the number of records ZipFile() parses.
+            if end[_END_ENTRIES] > cap:
+                raise _bad("source", f"must have at most {cap} entries")
+            if end[_END_DIRECTORY_SIZE] > budget:
+                raise _bad("source", f"has a zip directory larger than {budget} bytes")
+            directory_end = end[_END_LOCATION]
+            if end[_END_SIGNATURE] == _ZIP64_END:
+                file.seek(directory_end)
+                if file.read(4) != _ZIP64_END:
+                    directory_end -= _ZIP64_END_BYTES
+            first = max(directory_end - end[_END_DIRECTORY_SIZE], 0)
+            file.seek(first)
+            records = file.read(max(directory_end - first, 0)).count(_CENTRAL_HEADER)
+        if records > cap:
             raise _bad("source", f"must have at most {cap} entries")
-        if end[_END_DIRECTORY_SIZE] > budget:
-            raise _bad("source", f"has a zip directory larger than {budget} bytes")
         with zipfile.ZipFile(path) as archive:  # by path: zipfile reads the directory from disk
             entries = archive.infolist()
     except (zipfile.BadZipFile, ValueError, EOFError, NotImplementedError):
         # ValueError: a bad offset or name encoding; NotImplementedError: a zip version above 6.3
         raise _bad("source", "must be a zip archive") from None
-    if len(entries) > cap:
+    if len(entries) > cap:  # a backstop, should a zipfile read its directory from elsewhere
         raise _bad("source", f"must have at most {cap} entries")
     for entry in entries:
         # Both names: the one stored in the header, and the one zipfile extracts to, which an Info-ZIP

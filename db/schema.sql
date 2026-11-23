@@ -302,7 +302,10 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO orch_app, e1_role, e2_role, e3_ro
 -- No sequence grants: identity columns need none, and USAGE would let an engine burn
 -- another engine's ids with nextval() (D-40).
 
-GRANT INSERT, UPDATE, DELETE ON attempts, problems, test_cases, test_results       TO e1_role;
+GRANT INSERT, UPDATE, DELETE ON problems, test_cases, test_results                 TO e1_role;
+-- No DELETE on attempts: worker_liveness (E4) follows an attempt ON DELETE CASCADE, so an E1 delete
+-- would remove E4's rows around E4's grants (D-138).
+GRANT INSERT, UPDATE         ON attempts                                            TO e1_role;
 GRANT INSERT, UPDATE, DELETE ON jobs, workload_types, lab_sessions                  TO e2_role;
 GRANT INSERT, UPDATE, DELETE ON resources, allocations, allocation_items           TO e3_role;
 GRANT INSERT                 ON allocation_audit                                    TO e3_role;
