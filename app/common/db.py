@@ -80,6 +80,8 @@ class Tx:
         of tx() (D-48, D-67). When it rolls back (an exception, or psycopg.Rollback), the
         after_commit hooks registered inside it are dropped too, including those of inner
         savepoints that were already released, so nothing is pushed for work that was undone."""
+        if self.finished:  # its connection is back in the pool and may belong to another thread (D-141)
+            raise RuntimeError("savepoint() on a finished transaction")
         mark = len(self.hooks)
         released = False
         try:
@@ -165,16 +167,19 @@ def tx(engine: Engine) -> Iterator[Tx]:
             log.exception("after_commit_failed", engine=engine, hook=getattr(fn, "__qualname__", repr(fn)))
 
 
-def _refuse_unless_open(conn: psycopg.Connection[TupleRow], engine: str, t: Tx) -> None:
+def _refuse_unless_open(conn: psycopg.Connection[TupleRow], engine: Engine, t: Tx) -> None:
     """Commit only the transaction tx() opened (D-48). After an error the body caught, psycopg would
     send COMMIT and the server would roll back without an error; after a COMMIT or ROLLBACK the
-    body sent itself, COMMIT would do nothing. Either way the hooks would run as if committed."""
+    body sent itself, COMMIT would do nothing. Either way the hooks would run as if committed. A
+    statement after that COMMIT or ROLLBACK begins a new transaction, which reads open again but runs
+    without SET LOCAL ROLE, so the role tells the two apart (D-134)."""
     status = conn.info.transaction_status
     if status == TransactionStatus.INERROR:
         code = f" ({t.failed.sqlstate})" if t.failed is not None and t.failed.sqlstate else ""
         raise RuntimeError(f"tx({engine}): a statement failed{code} and its error was caught inside the "
                            "transaction; rolled back instead of committing") from t.failed
-    if status != TransactionStatus.INTRANS:
+    role = conn.execute("SELECT current_setting('role')").fetchone() if status == TransactionStatus.INTRANS else None
+    if role is None or role[0] != ROLE[engine]:
         raise RuntimeError(f"tx({engine}): the transaction was ended inside the block (a COMMIT or "
                            "ROLLBACK sent by hand), so its hooks are skipped")
 

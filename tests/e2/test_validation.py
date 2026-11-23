@@ -20,7 +20,7 @@ from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import psycopg
 import pytest
@@ -361,6 +361,72 @@ def test_a_zip_directory_too_large_for_the_entry_cap_is_refused_before_it_is_par
     monkeypatch.setattr(validation.zipfile, "ZipFile", parsed)
     assert refusal(ML, many, config=caps) == ("source", "must have at most 3 entries")
     assert refusal(ML, long_names, config=caps) == ("source", "has a zip directory larger than 3072 bytes")
+
+
+def test_an_end_record_that_understates_its_entries_is_refused_before_the_directory_is_parsed(
+        spool: Spool, monkeypatch: pytest.MonkeyPatch):
+    """Catches the entry cap taken from the end record's count alone: zipfile parses every record inside
+    the declared directory size and ignores the count, so a 10 MB upload declaring 1 entry made it build
+    222,608 objects (3.4 s, 83 MiB) before the refusal (Q1-14, Q1-16). Here 10 records say they are 1."""
+    caps = Config(python_ml_max_entries=3)
+    ten = zip_of({"main.py": b"1", **{f"f{i}": b"" for i in range(9)}})
+    end = len(ten) - 22
+    assert ten[end:end + 4] == b"PK\x05\x06"
+    one = ten[:end + 8] + struct.pack("<2H", 1, 1) + ten[end + 12:]  # both entry counts of the end record
+
+    def parsed(*args: object, **kwargs: object) -> None:
+        raise AssertionError("zipfile parsed the whole directory")
+
+    monkeypatch.setattr(validation.zipfile, "ZipFile", parsed)
+    assert refusal(ML, spool(one), config=caps) == ("source", "must have at most 3 entries")
+
+
+@pytest.mark.parametrize("zip64", [False, True], ids=["classic", "zip64"])
+def test_a_zip_stored_as_the_last_entry_adds_no_count(spool: Spool, monkeypatch: pytest.MonkeyPatch, zip64: bool):
+    """Catches the record count reaching past the directory (review of Q-1): an archive stored last (an .npz,
+    .pt or .whl is a zip file) ends with directory records of its own just before the outer directory, so
+    main.py and data.npz were refused under a cap of 2. Run it on 3.12.15 too: a zipfile with the
+    CVE-2025-8291 fix reports a zip64 directory as ending at the zip64 record (D-133)."""
+    inner = zip_of({"a": b"1"})
+    with monkeypatch.context() as m:
+        if zip64:
+            m.setattr(zipfile, "ZIP_FILECOUNT_LIMIT", 0)
+        data = zip_of({"main.py": b"print(1)\n", "data.npz": inner})
+    assert data.count(b"PK\x01\x02") == 3 and (b"PK\x06\x06" in data) == zip64  # the inner record and the two
+    assert validate(ML, spool(data), S0, Config(python_ml_max_entries=2)) == Accepted(3, "payload.zip")
+
+
+def test_a_zip64_archive_larger_than_the_end_copy_is_accepted(spool: Spool, monkeypatch: pytest.MonkeyPatch):
+    """Catches the end record read from a copy of the archive's last 128 KiB that loses the file's
+    offsets: since the CVE-2025-8291 fix (CPython 3.12.12 and 3.13.9) zipfile seeks to the absolute offset
+    the zip64 locator gives, and every valid zip64 archive over 128 KiB was refused there (Q1-07). The
+    3.13.5 venv predates the fix, so this test fails without it only on a fixed Python (3.12.15, D-132).
+    zipfile writes zip64 end records only past 65,535 entries, so the limit is lowered while it writes,
+    as writers that always use zip64 do."""
+    with monkeypatch.context() as m:
+        m.setattr(zipfile, "ZIP_FILECOUNT_LIMIT", 0)
+        data = zip_of({"main.py": b"print(1)\n", "weights.bin": bytes(300_000)})
+    assert b"PK\x06\x06" in data and b"PK\x06\x07" in data  # a zip64 end record and its locator
+    assert len(data) > 131072
+    assert validate(ML, spool(data), S0, DEFAULTS) == Accepted(3, "payload.zip")
+
+
+def test_the_end_record_reader_finds_the_archive_at_its_file_offsets(spool: Spool, monkeypatch: pytest.MonkeyPatch):
+    """Catches the end copy losing the file's offsets on any Python (review of Q-1): the 3.13.5 reader never
+    seeks to one, so the zip64 test above goes red only on a Python with the CVE-2025-8291 fix. Here the
+    real reader is handed the copy after it is asked for the end record at its offset in the file (D-132)."""
+    data = zip_of({"main.py": b"print(1)\n", "weights.bin": bytes(300_000)})
+    seen: list[bytes] = []
+    real = validation._END_RECORD
+
+    def reader(copy: BinaryIO) -> list[Any] | None:
+        copy.seek(len(data) - 22)
+        seen.append(copy.read(4))
+        return real(copy)
+
+    monkeypatch.setattr(validation, "_END_RECORD", reader)
+    assert validate(ML, spool(data), S0, DEFAULTS) == Accepted(3, "payload.zip")
+    assert seen == [b"PK\x05\x06"]
 
 
 # ---- submit() on a seeded database ------------------------------------------------------------------

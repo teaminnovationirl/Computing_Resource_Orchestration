@@ -196,7 +196,11 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
     except ValueError as exc:  # a bad setting is a usage error, like a bad argument
         print(f"capacity.py: {exc}", file=sys.stderr)
         return 2
-    database = conninfo_to_dict(cfg.database_url).get("dbname")
+    try:
+        database = conninfo_to_dict(cfg.database_url).get("dbname")
+    except psycopg.ProgrammingError:  # a bad setting too; psycopg may quote the URL, password and all (D-137)
+        print("capacity.py: DATABASE_URL is not a valid connection string. Nothing was changed.", file=sys.stderr)
+        return 2
     if args.check_database is not None:
         if database == args.check_database:
             return 0

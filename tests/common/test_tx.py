@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, LiteralString
 
@@ -122,6 +123,27 @@ def test_a_rollback_inside_the_block_skips_the_hooks(db: TempDb):
     assert ran == []
 
 
+@pytest.mark.parametrize(("end", "name", "kept"), [
+    ("ROLLBACK", "hand_rollback", 0), ("COMMIT", "hand_commit", 1), ("connection.rollback()", "hand_rollback_call", 0)])
+def test_an_end_sent_by_hand_then_a_read_still_skips_the_hooks(db: TempDb, end: LiteralString, name: str, kept: int):
+    """Catches the transaction status as the only check (Q1-02): any statement after a COMMIT or ROLLBACK
+    the body sent makes psycopg begin a new transaction, as orch_app because SET LOCAL ROLE ended with the
+    first, so the status reads open again and the hooks (a dispatch among them) would run for work that
+    was rolled back. A COMMIT sent by hand keeps its work; tx() still refuses (D-48, D-134)."""
+    ran: list[str] = []
+    with pytest.raises(RuntimeError, match="ended inside the block"):
+        with tx("E2") as cur:
+            cur.execute(NEW_TYPE, (name,))
+            cur.after_commit(lambda: ran.append("hook"))
+            if end == "connection.rollback()":
+                cur.cur.connection.rollback()  # the psycopg2 way to recover from an error
+            else:
+                cur.execute(end)
+            cur.execute(COUNT_TYPE, (name,)).fetchone()
+    assert _committed(db.owner_url, name) == kept
+    assert ran == []
+
+
 def test_a_failing_hook_is_logged_and_the_commit_stands(db: TempDb, json_log: Path):
     """Catches a hook error that undoes or hides the commit, skips the later hooks, or reaches the
     caller, who would then redo work that is already committed."""
@@ -196,6 +218,23 @@ def test_hooks_registered_in_a_savepoint_follow_its_outcome(db: TempDb):
     assert ran == ["before", "released", "after"]
 
 
+@pytest.mark.parametrize("connection", ["idle", "in_use", "closed"])
+def test_a_finished_tx_refuses_a_savepoint(db: TempDb, connection: str):
+    """Catches a savepoint on a Tx kept past its tx() (D-141): its connection is back in the pool, so
+    savepoint() began a transaction on it or, while another tx() used it, a savepoint inside that one, with
+    no error. The case in_use also catches a guard that reads the connection's status (the bug of Q1-06), and
+    the case closed a guard that touches the connection before it refuses."""
+    _reopen(db, 1)  # one connection: the next tx() gets the finished one's
+    with tx("E2") as t:
+        pass
+    if connection == "closed":
+        close_pool()
+    with tx("E4") if connection == "in_use" else nullcontext():
+        with pytest.raises(RuntimeError, match=r"savepoint\(\) on a finished transaction"):
+            with t.savepoint():
+                pass
+
+
 def test_transactions_on_two_threads_are_not_nested(db: TempDb):
     """Catches a process-wide nesting flag: a second thread's tx() would be refused while the
     first one is open. Two threads, a Barrier, 100 runs."""
@@ -215,7 +254,7 @@ def test_transactions_on_two_threads_are_not_nested(db: TempDb):
 
 
 @pytest.mark.parametrize("engine, own, other", [
-    ("E1", "DELETE FROM attempts WHERE false",
+    ("E1", "UPDATE attempts SET verdict = verdict WHERE false",  # no DELETE on attempts for E1 (D-138)
      "INSERT INTO resources (kind, gpu_index, total, reserved) VALUES ('gpu', 7, 1000, 100)"),
     ("E2", "DELETE FROM jobs WHERE false",
      "INSERT INTO users (user_id, role, password_hash) VALUES ('intruder', 'student', '$2b$12$x')"),

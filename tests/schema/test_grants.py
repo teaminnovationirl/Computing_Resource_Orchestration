@@ -13,6 +13,8 @@ OWNED = {
 GRANTED_WRITES = {(role, table, priv) for role, tables in OWNED.items()
                   for table in tables for priv in ("INSERT", "UPDATE", "DELETE")}
 GRANTED_WRITES.add(("e3_role", "allocation_audit", "INSERT"))
+# worker_liveness (E4) follows an attempt ON DELETE CASCADE, so E1 may not delete attempts (D-138).
+GRANTED_WRITES.discard(("e1_role", "attempts", "DELETE"))
 GRANTED_WRITES |= {(role, "jobs", "UPDATE") for role in ("e1_role", "e3_role", "e4_role")}  # column state only
 
 NEW_TYPE = "INSERT INTO workload_types VALUES ('extra_type', 3, 60)"
@@ -25,6 +27,7 @@ INSERT_JOB = ("INSERT INTO jobs (user_id, type_code, cpu_millicores, ram_mib, ti
 OWN_WRITES = [("e1_role", NEW_PROBLEM), ("e2_role", NEW_TYPE), ("e3_role", TOUCH_CPU), ("e4_role", TOUCH_ADMIN)]
 OTHER_WRITES = [
     ("e1_role", NEW_TYPE), ("e1_role", TOUCH_CPU),
+    ("e1_role", "DELETE FROM attempts"),  # its cascade would delete E4's worker_liveness rows (Q1-10)
     ("e2_role", TOUCH_ADMIN), ("e2_role", "DELETE FROM allocations"),
     ("e3_role", NEW_PROBLEM), ("e3_role", "UPDATE allocation_audit SET outcome = outcome"),
     ("e4_role", NEW_TYPE), ("e4_role", "DELETE FROM test_results"),

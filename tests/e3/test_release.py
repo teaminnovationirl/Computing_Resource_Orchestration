@@ -167,15 +167,18 @@ def test_a_second_release_is_already_released_and_changes_nothing(s0: TempDb, js
     assert_invariants(settled=True)
 
 
-def test_two_releases_of_one_job_at_once_give_one_released_and_one_already_released(s0: TempDb):
+def test_two_releases_of_one_job_at_once_give_one_released_and_one_already_released(s0: TempDb, json_log: Path):
     """Catches the open allocation read without its lock, or found by job alone: both calls are inside
     their transactions before either commits (one holds the allocation and waits on the gated CPU row,
     the other waits on the allocation), so the second must see the first's commit and change nothing.
-    The capacity comes back once, one release audit row is written and E2 hears once."""
+    The capacity comes back once, one release audit row is written and E2 hears once. A lock skipped
+    (SKIP LOCKED) fails in race(); a shared one (FOR SHARE) deadlocks, which retrying() hides but logs
+    (Q1-15)."""
     with ThreadPoolExecutor(max_workers=2) as pool:
         for run in range(1, RUNS + 1):
             job = finished()
             outcomes = race(s0, pool, [partial(release, job)] * 2)
+            assert logged(json_log, "tx_retry") == [] and logged(json_log, "tx_retry_exhausted") == []
             assert sorted(type(outcome).__name__ for outcome in outcomes) == ["AlreadyReleased", "Released"]
             assert held() == NOTHING_HELD
             assert [action for _, action, _ in written(job)["audit"]] == ["allocate", "release"]

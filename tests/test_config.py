@@ -100,6 +100,7 @@ def test_config_is_frozen():
         ("LOST_AFTER_S", "-6"),
         ("SWEEP_S", "nan"),
         ("MAX_RETRIES", "-1"),
+        ("MAX_RETRIES", "3"),  # jobs.retry_count holds 0 to 2 (FR-14), so a third requeue would fail (Q1-01)
         ("SANDBOX_BACKEND", "podman"),
         ("GPU_MODE", "cuda"),
         ("CAPACITY_PROFILE", "S0"),
