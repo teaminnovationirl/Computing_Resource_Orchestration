@@ -31,8 +31,8 @@ contains engine logic, and client machines never execute jobs.
 | --- | --- | --- | --- | --- | --- |
 | C | `.c` | `prog.c` | `gcc -O2 -std=c17 -o /out/prog /job/prog.c -lm` | `/out/prog` | x1 |
 | C++ | `.cpp` | `prog.cpp` | `g++ -O2 -std=c++17 -o /out/prog /job/prog.cpp` | `/out/prog` | x1 |
-| Java | `.java` | `Main.java` | `javac -d /out /job/Main.java` | `java -Xmx<M>m -Xss64m -XX:+UseSerialGC -cp /out Main` | x2 |
-| Python | `.py` | `prog.py` | none | `python3 -I -B /job/prog.py` | x3 |
+| Java | `.java` | `Main.java` | `javac -encoding UTF-8 -d /out /job/Main.java` | `java -Xmx<M>m -Xss64m -XX:+UseSerialGC -cp /out Main` | x2 |
+| Python | `.py` | `prog.py` | a syntax check that runs no code (D-145) | `python3 -I -B /job/prog.py` | x3 |
 
 - Submissions are full programs that read stdin and write stdout, in all four languages (D-91).
   Function-signature templates (`class Solution`) are a later proposal, because they need a wrapper per
@@ -174,9 +174,9 @@ For Python (D-97). It runs Python as python_ml jobs; C, C++ and Java use the cod
 
 ## 10. Build order
 
-E2-1, E2-2, E2-3, E2-4, E2-5; E1-1, E1-2 (fake sandbox); E4-2, E4-3, E4-4; E4-5, E4-6, E4-7; C-1
-(`SANDBOX_BACKEND=fake`); C-2, C-3; N-1; E1-3, E1-4 on the lab PC; C-4; X-1 to X-7; L-1 to L-3;
-W-1, W-2 (D-102).
+E2-1, E2-2, E2-3, E2-4, E2-5; E1-1; E2-6 (D-153); E1-2 (fake sandbox); E4-2, E4-3, E4-4; E4-5, E4-6,
+E4-7; C-1 (`SANDBOX_BACKEND=fake`); C-2, C-3; N-1; E1-3, E1-4 on the lab PC; C-4; X-1 to X-7; L-1 to
+L-3; W-1, W-2 (D-102).
 
 No slice is skipped. The table order of plan 14.1 is not required, but each slice still starts only
 when everything in its Needs column is merged (D-84).
