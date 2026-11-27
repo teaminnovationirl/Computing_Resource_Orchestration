@@ -69,6 +69,19 @@ another engine's internal modules.
 - Numbers come from the baseline. Anything else is a proposal: log it.
 - Written text (docs, UI strings): no em or en dashes.
 
+## Every plan states
+- Hostile input budget (D-156). For every untrusted input the slice touches
+  (uploads, archives, program output, request fields, WebSocket messages): its
+  cap; its worst-case CPU, memory and disk at that cap; and what bounds it: a
+  cap checked before the work, work linear in the capped size, a timeout, or a
+  child process with OS limits. A step that is not linear in the capped size
+  is a finding. Each worst case found gets a regression test that counts the
+  expensive operations, not seconds.
+- Per-job cost (D-157). A slice that adds work per job states its host cost
+  outside the job's sandbox, per running job and per queued job: memory, CPU,
+  processes, threads, database writes per second. Every per-job structure is
+  empty again once the job ends.
+
 ## Tests
 - Real PostgreSQL 16 built from db/schema.sql for anything touching locks,
   triggers or constraints. Never SQLite or mocks for the database.
