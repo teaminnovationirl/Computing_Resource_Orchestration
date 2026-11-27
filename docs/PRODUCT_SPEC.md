@@ -61,7 +61,11 @@ contains engine logic, and client machines never execute jobs.
   at its top level. Before anything is stored, E2 checks that the zip opens; has no absolute path, no
   `..` part and no link, under both the name stored and the name zipfile extracts to; has at most `PYTHON_ML_MAX_ENTRIES` entries (10,000) whose declared sizes
   total at most `PYTHON_ML_UNZIPPED_MAX_BYTES` (4 GiB); and that the upload is at most
-  `PYTHON_ML_UPLOAD_MAX_BYTES` (1 GiB). The three are Config settings (proposals, D-85).
+  `PYTHON_ML_UPLOAD_MAX_BYTES` (1 GiB). The three are Config settings (proposals, D-85). It also refuses
+  what the extraction below refuses and the zip's directory already shows (D-153, D-154): methods other
+  than stored and deflated, encryption, two files or a file and a folder of one name, more folders than
+  entries allowed, names too deep or too long to store, and records that overstate or share their data;
+  E2 may refuse more than E1, never less.
 - E1-1 extracts the zip safely: the same caps hold for the bytes actually written, because a zip's
   declared sizes can lie, and nothing lands outside the job's folder.
 - No network inside the sandbox (baseline). Datasets and weights come in the zip or from a read-only
@@ -158,6 +162,7 @@ For Python (D-97). It runs Python as python_ml jobs; C, C++ and Java use the cod
 | E2-1 (built) | Extension table, python_ml checks and seed row, upload caps in Config |
 | E2-5 (new) | Practice-run validation and the code_run seed row; submit() from the spooled file (section 4) |
 | E1-1 | Judge in four languages, practice runs, stack limits, safe zip extraction, the Java class message |
+| E2-6 (new) | Refusal at submit of what E1 cannot unpack (section 3, D-153) |
 | E1-2 | python_ml run path, log streaming, figure and output capture |
 | E1-3 | Both images, GPU pinning, the stack ulimit |
 | E1-4 | Reference solutions in four languages, plus problem 12's statement and samples |

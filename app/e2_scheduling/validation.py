@@ -1,4 +1,4 @@
-"""Request checks of submit() (plan 8.1 with D-76, D-79, D-90 and D-96). No database; the only file read
+"""Request checks of submit() (plan 8.1 with D-76, D-79, D-90, D-96 and D-154). No database; the only file read
 is the source it is given, a chunk at a time.
 
 validate() checks the fields in this order and raises ApiError(400, error, field) at the first that
@@ -15,8 +15,9 @@ import io
 import os
 import re
 import stat
+import struct
 import zipfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Final, Literal, cast
@@ -41,11 +42,19 @@ ML_FILES: Final[dict[str, FileName]] = {"py": "prog.py", "zip": "payload.zip"}
 UTF8_FILES: Final = frozenset({"prog.c", "prog.cpp", "prog.py"})  # Main.java: extension and size only
 UTF8_CHUNK: Final = 1 << 20
 ZIP_DIRECTORY_BYTES_PER_ENTRY: Final = 1024  # proposal (D-85): a directory record is 46 bytes plus its names
+ZIP_MAX_EXTRA_FIELDS: Final = 16  # of one directory record, a proposal (D-155): real archives have at most 2
 # The end record (22 bytes), its comment (at most 65,535) and the zip64 locator and record (20 and 56) all sit
 # in the last 65,633 bytes of an archive; the end record is parsed from a copy of the last 128 KiB.
 _END_TAIL: Final = 1 << 17
 _DRIVE: Final = re.compile(r"[A-Za-z]:")
-_SEPARATORS: Final = re.compile(r"[\\/]")
+# What E1's extract_zip() refuses and the directory shows (D-151, D-153). No engine imports another, so E2 has a copy
+# of those rules, and tests/e2/test_zip_parity.py runs both engines on the same archives.
+ZIP_MAX_DEPTH: Final = 100  # levels of a name
+ZIP_MAX_NAME_BYTES: Final = 4096
+ZIP_MAX_PART_BYTES: Final = 255
+_METHODS: Final = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+_ENCRYPTED: Final = 0x1  # a general purpose flag bit
+_NOT_READ: Final = 0x20 | 0x40  # patched data and strong encryption: zipfile raises once it opens a file with one
 # zipfile's own reader of the end of central directory record (zip64 included), so the bound in _zip()
 # applies to exactly the directory that ZipFile() parses next. It is private but has been in zipfile
 # since Python 2; it is looked up here, so a Python without it fails at start-up, not on a request.
@@ -57,6 +66,9 @@ _END_SIGNATURE: Final[int] = getattr(zipfile, "_ECD_SIGNATURE")  # noqa: B009 (n
 _CENTRAL_HEADER: Final = b"PK\x01\x02"  # the signature that starts every central directory record
 _ZIP64_END: Final = b"PK\x06\x06"  # the signature of the zip64 end record
 _ZIP64_END_BYTES: Final = 56 + 20  # the zip64 end record and its locator
+_RECORD_BYTES: Final = 46  # of a directory record, before its name, extra fields and comment
+_RECORD_LENGTHS: Final = struct.Struct("<28x3H")  # the lengths of those three, in the record
+_FIELD: Final = struct.Struct("<2xH")  # the header of one extra field: its number and the length of its data
 
 
 class _EndCopy(io.BytesIO):
@@ -234,13 +246,14 @@ def _is_utf8(path: Path) -> bool:
 
 
 def _zip(path: Path, config: Config) -> None:
-    """The python_ml archive rules (D-79), read from its central directory without unpacking anything.
+    """The python_ml archive rules (D-79, D-153), read from its central directory without unpacking anything.
     Sizes are the ones the entries declare: E1 must hold the same caps while it extracts."""
     cap = config.python_ml_max_entries
     budget = cap * ZIP_DIRECTORY_BYTES_PER_ENTRY
     try:
         with open(path, "rb") as file:  # an OSError here is the disk's, so it reaches the caller as one
-            start = max(os.fstat(file.fileno()).st_size - _END_TAIL, 0)
+            size = os.fstat(file.fileno()).st_size
+            start = max(size - _END_TAIL, 0)
             file.seek(start)
             tail = file.read()
             # Parsed from bytes: zipfile's reader seeks back from the end with no guard, so on a real file
@@ -255,8 +268,7 @@ def _zip(path: Path, config: Config) -> None:
             # 1 GiB upload of tiny records would otherwise cost gigabytes (D-133). It reads the size bytes that
             # end at the reported location, except that for a zip64 archive a zipfile from before the
             # CVE-2025-8291 fix reports the classic end record, 76 bytes past the zip64 one: the signature
-            # at that location tells which. Every record starts with the central header signature, which
-            # cannot overlap itself, so its count over those bytes is the number of records ZipFile() parses.
+            # at that location tells which.
             if end[_END_ENTRIES] > cap:
                 raise _bad("source", f"must have at most {cap} entries")
             if end[_END_DIRECTORY_SIZE] > budget:
@@ -268,27 +280,123 @@ def _zip(path: Path, config: Config) -> None:
                     directory_end -= _ZIP64_END_BYTES
             first = max(directory_end - end[_END_DIRECTORY_SIZE], 0)
             file.seek(first)
-            records = file.read(max(directory_end - first, 0)).count(_CENTRAL_HEADER)
-        if records > cap:
-            raise _bad("source", f"must have at most {cap} entries")
-        with zipfile.ZipFile(path) as archive:  # by path: zipfile reads the directory from disk
-            entries = archive.infolist()
+            _directory(file.read(max(directory_end - first, 0)), cap)
+            # The same open file, read from disk: the directory parsed is the one counted, of the size above.
+            with zipfile.ZipFile(file) as archive:
+                entries = archive.infolist()
     except (zipfile.BadZipFile, ValueError, EOFError, NotImplementedError):
         # ValueError: a bad offset or name encoding; NotImplementedError: a zip version above 6.3
         raise _bad("source", "must be a zip archive") from None
     if len(entries) > cap:  # a backstop, should a zipfile read its directory from elsewhere
         raise _bad("source", f"must have at most {cap} entries")
+    _entries(entries, size, config)
+
+
+def _directory(records: bytes, cap: int) -> None:
+    """The bounds that hold before ZipFile() parses these bytes: how many records there are, and the extra fields of
+    each. zipfile slices what is left of a record's extra fields again for every one of them, so a directory of 10 MB
+    that is nothing else took 4.5 s (D-155). The walk steps as zipfile does, and bytes that are not records to their end
+    are refused here, as ZipFile() refuses them: should a zipfile read its directory from elsewhere, these bounds fail
+    closed instead of passing bytes they never judged (security review of E2-6)."""
+    # Every record starts with the signature, which cannot overlap itself, so there are at most that many (D-133).
+    if records.count(_CENTRAL_HEADER) > cap:
+        raise _bad("source", f"must have at most {cap} entries")
+    at = 0
+    while records.startswith(_CENTRAL_HEADER, at) and len(records) - at >= _RECORD_BYTES:
+        name, extra, comment = _RECORD_LENGTHS.unpack_from(records, at)
+        field = at + _RECORD_BYTES + name
+        end = min(field + extra, len(records))
+        fields = 0
+        while end - field >= _FIELD.size:
+            fields += 1
+            if fields > ZIP_MAX_EXTRA_FIELDS:
+                raise _bad("source", f"must have at most {ZIP_MAX_EXTRA_FIELDS} extra fields in an entry")
+            field += _FIELD.size + _FIELD.unpack_from(records, field)[0]
+        at += _RECORD_BYTES + name + extra + comment
+    if at < len(records):  # no whole record where one must start: ZipFile() refuses such a directory too
+        raise zipfile.BadZipFile("the directory is not records to its end")
+
+
+def _entries(entries: Sequence[zipfile.ZipInfo], archive_bytes: int, config: Config) -> None:
+    """The rules on the entries, in one pass over at most PYTHON_ML_MAX_ENTRIES of them; the first that fails
+    decides (D-154). For each entry first D-79's own, then what E1's extract_zip() refuses and the directory shows, in
+    E1's words and with the name judged that it judges, the one zipfile extracts to."""
+    packed = unpacked = 0
+    offsets: set[int] = set()
+    names = _Names(config.python_ml_max_entries)
+    has_main = False
     for entry in entries:
         # Both names: the one stored in the header, and the one zipfile extracts to, which an Info-ZIP
         # Unicode Path field (0x7075) replaces and a NUL cuts short; on Windows it also has / for \.
-        for name in (entry.orig_filename, entry.filename):
+        for name in dict.fromkeys((entry.orig_filename, entry.filename)):  # one, when they are the same
             if name.startswith(("/", "\\")) or _DRIVE.match(name):
                 raise _bad("source", "must not contain an absolute path")
-            if ".." in _SEPARATORS.split(name):
+            if "/../" in "/" + name.replace("\\", "/") + "/":  # searched, not split: no list of its parts (D-155)
                 raise _bad("source", "must not contain a '..' part")
         if stat.S_ISLNK(entry.external_attr >> 16):
             raise _bad("source", "must not contain a link")
-    if sum(entry.file_size for entry in entries) > config.python_ml_unzipped_max_bytes:
+        if entry.flag_bits & _ENCRYPTED:
+            raise _bad("source", "must not contain an encrypted entry")
+        if entry.compress_type not in _METHODS:
+            raise _bad("source", "must contain only stored or deflated entries")
+        if entry.flag_bits & _NOT_READ and not entry.filename.endswith("/"):  # a folder's own entry is never opened
+            raise _bad("source", "must be a zip archive that can be unpacked")
+        packed += entry.compress_size
+        if packed > archive_bytes:
+            raise _bad("source", "must not name more data than it holds")
+        if entry.header_offset in offsets:
+            raise _bad("source", "must not name one member twice")
+        offsets.add(entry.header_offset)
+        if len(entry.orig_filename.encode()) > ZIP_MAX_NAME_BYTES:  # the name before a NUL cut it short
+            raise _bad("source", "must not contain a name too long to store")
+        names.add(entry.filename)
+        unpacked += entry.file_size
+        has_main = has_main or entry.filename == "main.py"
+    if unpacked > config.python_ml_unzipped_max_bytes:
         raise _bad("source", f"must unpack to at most {config.python_ml_unzipped_max_bytes} bytes")
-    if not any(entry.filename == "main.py" for entry in entries):
+    if not has_main:
         raise _bad("source", "must have main.py at its top level")
+
+
+class _Names:
+    """The files, and the folders (at most cap of them), that extract_zip() would make: '.' and empty parts of a name
+    are dropped, and a name that ends in / is a folder. Each is kept under the number of the folder it is in, never by
+    its whole path, so what it costs does not grow with its depth."""
+
+    def __init__(self, cap: int) -> None:
+        self._cap = cap
+        self._folders: dict[tuple[int, bytes], int] = {}  # number 0 is the top level
+        self._files: set[tuple[int, bytes]] = set()
+
+    def add(self, name: str) -> None:
+        raw = name.encode()
+        parts = [part for part in raw.split(b"/") if part not in (b"", b".")]
+        if len(raw) > ZIP_MAX_NAME_BYTES or any(len(part) > ZIP_MAX_PART_BYTES for part in parts):
+            raise _bad("source", "must not contain a name too long to store")
+        if len(parts) > ZIP_MAX_DEPTH:
+            raise _bad("source", f"must have names of at most {ZIP_MAX_DEPTH} levels")
+        is_folder = raw.endswith(b"/")
+        inside = 0
+        for part in parts if is_folder else parts[:-1]:
+            inside = self._folder((inside, part))
+        if is_folder:
+            return
+        if not parts:
+            raise _bad("source", "must not contain a file without a name")
+        file = (inside, parts[-1])
+        if file in self._files:
+            raise _bad("source", "must not contain two files of one name")
+        if file in self._folders:
+            raise _bad("source", "must not contain a file and a folder of one name")
+        self._files.add(file)
+
+    def _folder(self, folder: tuple[int, bytes]) -> int:
+        """The number of a folder, which is new when no entry has named it before."""
+        number = self._folders.get(folder)
+        if number is None:
+            if folder in self._files:
+                raise _bad("source", "must not contain a file and a folder of one name")
+            if len(self._folders) == self._cap:
+                raise _bad("source", f"must have at most {self._cap} folders")
+            number = self._folders[folder] = len(self._folders) + 1
+        return number

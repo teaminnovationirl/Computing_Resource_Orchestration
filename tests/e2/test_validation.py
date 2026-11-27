@@ -13,6 +13,7 @@ import io
 import json
 import re
 import struct
+import sys
 import threading
 import zipfile
 import zlib
@@ -309,12 +310,17 @@ def test_an_unsafe_or_incomplete_zip_is_refused(spool: Spool, files: dict[str, b
 ], ids=["dot dot", "absolute", "drive letter"])
 def test_a_unicode_path_field_cannot_hide_an_unsafe_name(spool: Spool, extracted: str, error: str):
     """Catches the name rules applied to the stored name only: zipfile extracts an entry stored as
-    ok.txt under the name in its Unicode Path field, which here leaves the job folder (review of E2-1)."""
+    ok.txt under the name in its Unicode Path field, which here leaves the job folder (review of E2-1).
+    Python 3.11 does not read the field and extracts the entry as ok.txt, so there it is accepted."""
     data = unicode_path_zip("ok.txt", extracted)
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         entry = archive.infolist()[1]
-    assert entry.orig_filename == "ok.txt" and entry.filename != "ok.txt"  # the archive carries both names
-    assert refusal(ML, spool(data)) == ("source", error)
+    assert entry.orig_filename == "ok.txt"
+    assert (entry.filename != "ok.txt") == (sys.version_info >= (3, 12))
+    if entry.filename == "ok.txt":
+        assert validate(ML, spool(data), S0, DEFAULTS) == Accepted(3, "payload.zip")
+    else:
+        assert refusal(ML, spool(data)) == ("source", error)
 
 
 def test_bytes_that_are_not_a_zip_archive_are_refused(spool: Spool):
@@ -576,7 +582,11 @@ def test_every_refusal_writes_no_job_no_folder_and_no_event(e2: E2Service, seede
                                                  "largest GPU)")),
              (change(source_name="prog.C"), C_SOURCE, ("source_name", CODE_EXTENSIONS)),
              (SAMPLE, NOT_UTF8, ("source", "must be UTF-8 text")),
-             (ML, zip_of({"main.py": b"1", "../evil.py": b"1"}), ("source", "must not contain a '..' part"))]
+             (ML, zip_of({"main.py": b"1", "../evil.py": b"1"}), ("source", "must not contain a '..' part")),
+             (ML, zip_of({"main.py": b"1"}, compression=zipfile.ZIP_BZIP2), (
+                 "source", "must contain only stored or deflated entries")),
+             (ML, zip_of({"main.py": b"1", "pkg": b"1", "pkg/a.py": b"1"}), (
+                 "source", "must not contain a file and a folder of one name"))]
     left: dict[Path, bytes] = {}
     for req, source, expected in cases:
         path = spool(source)
